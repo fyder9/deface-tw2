@@ -354,7 +354,7 @@ def main():
             # or an invalid path. The latter two cases are handled below.
             ipaths.append(path)
 
-    
+    #comfy variables
     base_opath = args.output
     replacewith = args.replacewith
     enable_preview = args.preview
