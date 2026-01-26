@@ -4,18 +4,21 @@ import argparse
 import json
 import mimetypes
 import os
-from typing import Dict, Tuple
+from typing import Dict, Tuple, TYPE_CHECKING, Any
 
 import tqdm
 import skimage.draw
 import numpy as np
 import imageio
 import imageio.v2 as iio
-import imageio.plugins.ffmpeg
 import cv2
 
 from deface import __version__
-from deface.centerface import CenterFace
+
+if TYPE_CHECKING:
+    from deface.centerface import CenterFace
+
+default_scrfd_onnx_path = f'{os.path.dirname(__file__)}/scrfd_2.5g.onnx'
 
 
 def scale_bb(x1, y1, x2, y2, mask_scale=1.0):
@@ -105,7 +108,7 @@ def cam_read_iter(reader):
 def video_detect(
         ipath: str,
         opath: str,
-        centerface: CenterFace,
+        centerface: Any,
         threshold: float,
         enable_preview: bool,
         cam: bool,
@@ -186,7 +189,7 @@ def video_detect(
 def image_detect(
         ipath: str,
         opath: str,
-        centerface: CenterFace,
+        centerface: Any,
         threshold: float,
         replacewith: str,
         mask_scale: float,
@@ -255,6 +258,8 @@ def get_anonymized_image(frame,
     returns frame
     """
 
+    from deface.centerface import CenterFace
+
     centerface = CenterFace(in_shape=None, backend='auto')
     dets, _ = centerface(frame, threshold=threshold)
 
@@ -275,6 +280,9 @@ def parse_cli_args():
     parser.add_argument(
         '--output', '-o', default=None, metavar='O',
         help='Output file name. Defaults to input path + postfix "_anonymized".')
+    parser.add_argument(
+        '--detector', default='scrfd', choices=['scrfd', 'centreface'],
+        help='Face detector backend. Default: "scrfd".')
     parser.add_argument(
         '--thresh', '-t', default=0.2, type=float, metavar='T',
         help='Detection threshold (tune this to trade off between false positive and false negative rate). Default: 0.2.')
@@ -381,7 +389,29 @@ def main():
 
 
     # TODO: scalar downscaling setting (-> in_shape), preserving aspect ratio
-    centerface = CenterFace(in_shape=in_shape, backend=backend, override_execution_provider=execution_provider)
+    if args.detector == 'scrfd':
+        from deface.scrfd_detector import SCRFDdetector
+
+        if not os.path.isfile(default_scrfd_onnx_path):
+            raise RuntimeError(
+                f'SCRFD detector selected but default model file not found at {default_scrfd_onnx_path}. '
+                'Provide the model file there or use --detector centreface.'
+            )
+        detector = SCRFDdetector(
+            model_path=default_scrfd_onnx_path,
+            device='cpu',
+            override_execution_provider=execution_provider,
+        )
+    elif args.detector == 'centreface':
+        from deface.centerface import CenterFace
+
+        detector = CenterFace(
+            in_shape=in_shape,
+            backend=backend,
+            override_execution_provider=execution_provider,
+        )
+    else:
+        raise RuntimeError(f'Unknown detector: {args.detector}')
 
     multi_file = len(ipaths) > 1
     if multi_file:
@@ -404,7 +434,7 @@ def main():
             video_detect(
                 ipath=ipath,
                 opath=opath,
-                centerface=centerface,
+                centerface=detector,
                 threshold=threshold,
                 cam=is_cam,
                 replacewith=replacewith,
@@ -423,7 +453,7 @@ def main():
             image_detect(
                 ipath=ipath,
                 opath=opath,
-                centerface=centerface,
+                centerface=detector,
                 threshold=threshold,
                 replacewith=replacewith,
                 mask_scale=mask_scale,
