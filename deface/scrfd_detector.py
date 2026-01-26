@@ -41,7 +41,8 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
             new_h = int(h * scale)
             frame = cv2.resize(frame, (new_w, new_h))
         else:
-            return frame, 1.0, 1.0
+            scale = 1.0
+            return frame, 1.0, 1.0, scale
         #returning resized or original frame
         return frame, new_w , new_h, scale
     
@@ -86,6 +87,12 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
                     y1 = py - dy1 * stride
                     x2 = px + dx2 * stride
                     y2 = py + dy2 * stride
+                    #check if x1,x2,y1,y2 are in the frame 
+                    x1 = max(0, min(x1, new_w - 1))
+                    y1 = max(0, min(y1, new_h - 1))
+                    x2 = max(0, min(x2, new_w - 1))
+                    y2 = max(0, min(y2, new_h - 1))
+                    if x2 <= x1 or y2 <= y1: continue                    
                     pixel_boxes.append([x1, y1, x2, y2, score])
 
                     lm = kps[i] #landmarks
@@ -126,7 +133,9 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
         """
         # Run inference & print output shapes
         outputs, new_w, new_h, scale = self.infer(frame)
-        self.decode_outputs(outputs, new_w, new_h, scale)
+        pixel_boxes, pixel_lms = self.decode_outputs(outputs, new_w, new_h, scale)
+        kept_boxes, kept_lms = self.nms(pixel_boxes, pixel_lms, iou_threshold=self.nms_iou)
+
         # Debug output shapes once
         if not hasattr(self, "_printed_shapes"):
             print("SCRFD raw outputs:")
@@ -136,7 +145,9 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
                 else:
                     print(f"  [{i}] type={type(o)}")
             self._printed_shapes = True
-            
+        
+        print(f"Kept {len(kept_boxes)} boxes after NMS.")
+        print("resolution:", frame.shape)
 
         # Return empty detections until decode+NMS is implemented
         dets = np.zeros((0, 5), dtype=np.float32)
