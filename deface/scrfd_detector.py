@@ -8,7 +8,8 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
         import onnxruntime
         #from .scrfd import SCRFD
         self.cap_long_side = cap_long_side  # Maximum long side length for input frames
-        providers = onnxruntime.get_available_providers()   # Get list of available providers & choose one
+        providers = onnxruntime.get_available_providers()
+        print("Available providers:", providers)   # Get list of available providers & choose one
          # If no override, use all available providers
         if override_execution_provider is None:
             ort_providers = providers
@@ -60,7 +61,6 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
         blob = self.preprocess(frame)
         #print("input shapes:", self.sess.get_inputs()[0].shape)
         outputs = self.sess.run(self.output_names, {self.input_name: blob})
-        print("Using SCRFD model. Provider:", self.sess.get_providers()[0])
         return outputs, new_w, new_h, scale, org_w, org_h
     
     def decode_outputs(self, outputs, new_w, new_h, scale, org_w, org_h): #Decode raw outputs to pixel boxes and landmarks
