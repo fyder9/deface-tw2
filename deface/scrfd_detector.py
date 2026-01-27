@@ -60,6 +60,7 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
         blob = self.preprocess(frame)
         #print("input shapes:", self.sess.get_inputs()[0].shape)
         outputs = self.sess.run(self.output_names, {self.input_name: blob})
+        print("Using SCRFD model. Provider:", self.sess.get_providers()[0])
         return outputs, new_w, new_h, scale, org_w, org_h
     
     def decode_outputs(self, outputs, new_w, new_h, scale, org_w, org_h): #Decode raw outputs to pixel boxes and landmarks
