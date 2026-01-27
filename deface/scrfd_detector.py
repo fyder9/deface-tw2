@@ -31,7 +31,7 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
                 img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
             return img
     
-    def resize_frame(self, frame: np.ndarray) -> tuple[np.ndarray, float, float]:
+    def resize_frame(self, frame: np.ndarray) -> tuple[np.ndarray, int, int, float, int ,int]:
         #Resize input frame to have its long side equal to cap_long_side while maintaining aspect ratio
         h, w = frame.shape[:2]
         longside = max(h, w)
@@ -42,9 +42,9 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
             frame = cv2.resize(frame, (new_w, new_h))
         else:
             scale = 1.0
-            return frame, 1.0, 1.0, scale
+            return frame, w, h, scale, w, h
         #returning resized or original frame
-        return frame, new_w , new_h, scale
+        return frame, new_w , new_h, scale, w ,h
     
     def preprocess(self, img_rgb: np.ndarray) -> np.ndarray:
         #TODO:Convert input from RGB to BGR based on SCRFD requirements
@@ -56,13 +56,13 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
     
     def infer(self, frame: np.ndarray): #Perform raw inference on input frame
         frame = self.ensure_rgb(frame)
-        frame, new_w, new_h, scale = self.resize_frame(frame)
+        frame, new_w, new_h, scale, org_w, org_h = self.resize_frame(frame)
         blob = self.preprocess(frame)
-        print("input shapes:", self.sess.get_inputs()[0].shape)
+        #print("input shapes:", self.sess.get_inputs()[0].shape)
         outputs = self.sess.run(self.output_names, {self.input_name: blob})
-        return outputs, new_w, new_h, scale
-
-    def decode_outputs(self, outputs, new_w, new_h, scale):
+        return outputs, new_w, new_h, scale, org_w, org_h
+    
+    def decode_outputs(self, outputs, new_w, new_h, scale, org_w, org_h): #Decode raw outputs to pixel boxes and landmarks
         pixel_boxes = []
         pixel_lms = []
 
@@ -73,34 +73,39 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
             stride = 8 * (2 ** scale_idx)
             fm_h = int(np.ceil(new_h / stride)) #feature map height * stride 8,16,32
             fm_w = int(np.ceil(new_w / stride)) #feature map width
+            A = scores.shape[0] // (fm_w * fm_h)  
 
             for i in range(scores.shape[0]): # for each anchor point
                 score = float(scores[i][0])
                 if score > self.score_thresh: #filter by score threshold
-                    px = (i % fm_w + 0.5) * stride #x coordinate of anchor point
-                    py = (i // fm_w + 0.5) * stride #y coordinate of anchor point
-                    dx1 = bboxes[i][0] 
+                    cell = i // A          # cell index grid H x W
+                    gx = cell % fm_w       # x feature map
+                    gy = cell // fm_w      # y feature map
+
+                    px = (gx + 0.5) * stride
+                    py = (gy + 0.5) * stride
+                    dx1 = bboxes[i][0]  
                     dy1 = bboxes[i][1]
                     dx2 = bboxes[i][2]
                     dy2 = bboxes[i][3]
-                    x1 = px - dx1 * stride
-                    y1 = py - dy1 * stride
-                    x2 = px + dx2 * stride
-                    y2 = py + dy2 * stride
+                    x1 = (px - dx1 * stride) / scale
+                    y1 = (py - dy1 * stride) / scale
+                    x2 = (px + dx2 * stride) / scale
+                    y2 = (py + dy2 * stride) / scale
                     #check if x1,x2,y1,y2 are in the frame 
-                    x1 = max(0, min(x1, new_w - 1))
-                    y1 = max(0, min(y1, new_h - 1))
-                    x2 = max(0, min(x2, new_w - 1))
-                    y2 = max(0, min(y2, new_h - 1))
+                    x1 = max(0, min(x1, org_w - 1))
+                    y1 = max(0, min(y1, org_h - 1))
+                    x2 = max(0, min(x2, org_w - 1))
+                    y2 = max(0, min(y2, org_h - 1))
                     if x2 <= x1 or y2 <= y1: continue                    
                     pixel_boxes.append([x1, y1, x2, y2, score])
 
                     lm = kps[i] #landmarks
                     lm_out = []
                     for j in range(5):
-                        x = (px + float(lm[2*j])     * stride) / scale
+                        lx = (px + float(lm[2*j])     * stride) / scale
                         ly = (py + float(lm[2*j + 1]) * stride) / scale
-                        lm_out.extend([x, ly])
+                        lm_out.extend([lx, ly])
                     pixel_lms.append(lm_out)
 
         return pixel_boxes, pixel_lms
@@ -121,6 +126,17 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
         kept_boxes = [pixel_boxes[i] for i in idx]
         kept_lms   = [pixel_lms[i] for i in idx] if pixel_lms is not None else None
         return kept_boxes, kept_lms
+    
+    def draw_blurred_boxes(self, frame: np.ndarray, boxes: list):
+        for (x1, y1, x2, y2, s) in boxes:
+            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+            face_roi = frame[y1:y2, x1:x2]
+            if face_roi.size == 0:
+                continue
+            ksize = (max(1, (x2 - x1) // 7 | 1), max(1, (y2 - y1) // 7 | 1))  # Ensure odd kernel size
+            blurred_face = cv2.GaussianBlur(face_roi, ksize, 0)
+            frame[y1:y2, x1:x2] = blurred_face
+        return frame
 
     def __call__(self, frame: np.ndarray, threshold: float = 0.5):
         """
@@ -132,25 +148,16 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
         output tensor shapes once for debugging.
         """
         # Run inference & print output shapes
-        outputs, new_w, new_h, scale = self.infer(frame)
-        pixel_boxes, pixel_lms = self.decode_outputs(outputs, new_w, new_h, scale)
+        outputs, new_w, new_h, scale, org_w, org_h = self.infer(frame)
+        pixel_boxes, pixel_lms = self.decode_outputs(outputs, new_w, new_h, scale, org_w, org_h)
         kept_boxes, kept_lms = self.nms(pixel_boxes, pixel_lms, iou_threshold=self.nms_iou)
-
-        # Debug output shapes once
-        if not hasattr(self, "_printed_shapes"):
-            print("SCRFD raw outputs:")
-            for i, o in enumerate(outputs):
-                if isinstance(o, np.ndarray):
-                    print(f"  [{i}] shape={o.shape} dtype={o.dtype}")
-                else:
-                    print(f"  [{i}] type={type(o)}")
-            self._printed_shapes = True
+        #frame = self.draw_blurred_boxes(frame, kept_boxes)
         
-        print(f"Kept {len(kept_boxes)} boxes after NMS.")
-        print("resolution:", frame.shape)
+        #print(f"Kept {len(kept_boxes)} boxes after NMS.")
+        #print("resolution:", frame.shape)
 
-        # Return empty detections until decode+NMS is implemented
-        dets = np.zeros((0, 5), dtype=np.float32)
-        lms = np.zeros((0, 10), dtype=np.float32)
+        # Return detections 
+        dets = np.asarray(kept_boxes, dtype=np.float32) if kept_boxes else np.zeros((0,5), np.float32)
+        lms = np.asarray(kept_lms, dtype=np.float32) if kept_lms else np.zeros((0,10), np.float32)
         return dets, lms
         
