@@ -10,7 +10,6 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
         self.cap_long_side = cap_long_side  # Maximum long side length for input frames
          # If no override, use all available providers
         if override_execution_provider is None:
-            ort_providers = providers
             available = onnxruntime.get_available_providers()
             if "CUDAExecutionProvider" in available:
                 ort_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
