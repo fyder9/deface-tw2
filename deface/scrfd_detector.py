@@ -8,16 +8,21 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
         import onnxruntime
         #from .scrfd import SCRFD
         self.cap_long_side = cap_long_side  # Maximum long side length for input frames
-        providers = onnxruntime.get_available_providers()
-        print("Available providers:", providers)   # Get list of available providers & choose one
          # If no override, use all available providers
         if override_execution_provider is None:
             ort_providers = providers
-        else:
-            if override_execution_provider in providers:
-                ort_providers = [override_execution_provider]
+            available = onnxruntime.get_available_providers()
+            if "CUDAExecutionProvider" in available:
+                ort_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            elif "DmlExecutionProvider" in available:
+                ort_providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
             else:
-                raise ValueError(f"Requested execution provider '{override_execution_provider}' is not available. Available providers: {providers}")
+                ort_providers = ["CPUExecutionProvider"]
+        else:
+            ort_providers = [override_execution_provider, "CPUExecutionProvider"]
+
+        self.sess = onnxruntime.InferenceSession(model_path, providers=ort_providers)
+        print("Running on:", self.sess.get_providers()[0])
         self.sess = onnxruntime.InferenceSession(model_path, providers=ort_providers)
         self.input_name = self.sess.get_inputs()[0].name
         self.output_names = [output.name for output in self.sess.get_outputs()]
