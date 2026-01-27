@@ -108,4 +108,3 @@ ENV/
 # VS Code
 .vscode/
 
-deface/_version.py

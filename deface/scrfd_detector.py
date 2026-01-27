@@ -151,10 +151,6 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
         outputs, new_w, new_h, scale, org_w, org_h = self.infer(frame)
         pixel_boxes, pixel_lms = self.decode_outputs(outputs, new_w, new_h, scale, org_w, org_h)
         kept_boxes, kept_lms = self.nms(pixel_boxes, pixel_lms, iou_threshold=self.nms_iou)
-        #frame = self.draw_blurred_boxes(frame, kept_boxes)
-        
-        #print(f"Kept {len(kept_boxes)} boxes after NMS.")
-        #print("resolution:", frame.shape)
 
         # Return detections 
         dets = np.asarray(kept_boxes, dtype=np.float32) if kept_boxes else np.zeros((0,5), np.float32)
