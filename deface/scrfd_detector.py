@@ -6,23 +6,54 @@ import math
 class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
     def __init__(self, model_path: str, device: str = "cpu", cap_long_side: int = 1920, override_execution_provider: str = None):
         import onnxruntime
-        #from .scrfd import SCRFD
-        self.cap_long_side = cap_long_side  # Maximum long side length for input frames
-         # If no override, use all available providers
-        if override_execution_provider is None:
-            available = onnxruntime.get_available_providers()
-            if "CUDAExecutionProvider" in available:
-                ort_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            elif "DmlExecutionProvider" in available:
-                ort_providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
-            else:
-                ort_providers = ["CPUExecutionProvider"]
-        else:
-            ort_providers = [override_execution_provider, "CPUExecutionProvider"]
 
-        self.sess = onnxruntime.InferenceSession(model_path, providers=ort_providers)
-        print("Running on:", self.sess.get_providers()[0])
-        self.sess = onnxruntime.InferenceSession(model_path, providers=ort_providers)
+        self.cap_long_side = cap_long_side  # Maximum long side length for input frames
+
+        available = onnxruntime.get_available_providers()
+
+        def _make_session(providers_list):
+            return onnxruntime.InferenceSession(model_path, providers=providers_list)
+
+        if override_execution_provider is not None:
+            if override_execution_provider not in available:
+                raise ValueError(
+                    f"Requested execution provider '{override_execution_provider}' is not available. "
+                    f"Available providers: {available}"
+                )
+            candidates = [[override_execution_provider, "CPUExecutionProvider"]]
+        else:
+            dev = (device or "cpu").lower()
+            if dev == "cpu":
+                candidates = [["CPUExecutionProvider"]]
+            else:
+                # Prefer CUDA first, then DirectML, then CPU.
+                cand = []
+                if "CUDAExecutionProvider" in available:
+                    cand.append(["CUDAExecutionProvider", "CPUExecutionProvider"])
+                if "DmlExecutionProvider" in available:
+                    cand.append(["DmlExecutionProvider", "CPUExecutionProvider"])
+                cand.append(["CPUExecutionProvider"])
+                candidates = cand
+
+        last_err = None
+        self.sess = None
+        for provs in candidates:
+            try:
+                self.sess = _make_session(provs)
+                break
+            except Exception as e:
+                last_err = e
+                continue
+
+        if self.sess is None:
+            raise RuntimeError(f"Failed to create ONNX Runtime session. Last error: {last_err}")
+
+        # Debug: confirm what ORT actually ended up using
+        preferred_provider = self.sess.get_providers()[0] if self.sess.get_providers() else "<none>"
+        print("SCRFD available providers:", available)
+        print("SCRFD selected providers:", self.sess.get_providers())
+        print("Running on:", preferred_provider)
+
         self.input_name = self.sess.get_inputs()[0].name
         self.output_names = [output.name for output in self.sess.get_outputs()]
         self.nms_iou = 0.4
