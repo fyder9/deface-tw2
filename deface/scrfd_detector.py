@@ -98,7 +98,7 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
         outputs = self.sess.run(self.output_names, {self.input_name: blob})
         return outputs, new_w, new_h, scale, org_w, org_h
     
-    def decode_outputs(self, outputs, new_w, new_h, scale, org_w, org_h): #Decode raw outputs to pixel boxes and landmarks
+    def decode_outputs(self, outputs, new_w, new_h, scale, org_w, org_h, score_thresh: float | None = None): #Decode raw outputs to pixel boxes and landmarks
         pixel_boxes = []
         pixel_lms = []
 
@@ -113,7 +113,8 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
 
             for i in range(scores.shape[0]): # for each anchor point
                 score = float(scores[i][0])
-                if score > self.score_thresh: #filter by score threshold
+                thresh = self.score_thresh if score_thresh is None else float(score_thresh)
+                if score > thresh: #filter by score threshold
                     cell = i // A          # cell index grid H x W
                     gx = cell % fm_w       # x feature map
                     gy = cell // fm_w      # y feature map
@@ -177,15 +178,11 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
     def __call__(self, frame: np.ndarray, threshold: float = 0.5):
         """
         CenterFace-compatible callable wrapper.
-
-        SCRFD ONNX models typically output feature maps (scores, bbox, kps heads),
-        not decoded detections. Until proper decode+NMS is implemented, this
-        wrapper only runs inference and returns empty detections while printing
-        output tensor shapes once for debugging.
         """
         # Run inference & print output shapes
         outputs, new_w, new_h, scale, org_w, org_h = self.infer(frame)
-        pixel_boxes, pixel_lms = self.decode_outputs(outputs, new_w, new_h, scale, org_w, org_h)
+        # Use the per-call threshold (matches CenterFace behavior and CLI --thresh)
+        pixel_boxes, pixel_lms = self.decode_outputs(outputs, new_w, new_h, scale, org_w, org_h, score_thresh=threshold)
         kept_boxes, kept_lms = self.nms(pixel_boxes, pixel_lms, iou_threshold=self.nms_iou)
 
         # Return detections 

@@ -281,11 +281,11 @@ def parse_cli_args():
         '--output', '-o', default=None, metavar='O',
         help='Output file name. Defaults to input path + postfix "_anonymized".')
     parser.add_argument(
-        '--detector', default='scrfd', choices=['scrfd', 'centreface'],
-        help='Face detector backend. Default: "scrfd".')
+        '--detector', default='scrfd2.5g', choices=['scrfd2.5g','scrfd10g', 'centerface'],
+        help='Face detector backend. Default: "scrfd2.5g".')
     parser.add_argument(
-        '--thresh', '-t', default=0.2, type=float, metavar='T',
-        help='Detection threshold (tune this to trade off between false positive and false negative rate). Default: 0.2.')
+        '--thresh', '-t', default=0.3, type=float, metavar='T',
+        help='Detection threshold (tune this to trade off between false positive and false negative rate). Default: 0.3.')
     parser.add_argument(
         '--scale', '-s', default=None, metavar='WxH',
         help='Downscale images for network inference to this size (format: WxH, example: --scale 640x360).')
@@ -389,20 +389,34 @@ def main():
 
 
     # TODO: scalar downscaling setting (-> in_shape), preserving aspect ratio
-    if args.detector == 'scrfd':
+    if args.detector == 'scrfd2.5g':
         from deface.scrfd_detector import SCRFDdetector
 
         if not os.path.isfile(default_scrfd_onnx_path):
             raise RuntimeError(
                 f'SCRFD detector selected but default model file not found at {default_scrfd_onnx_path}. '
-                'Provide the model file there or use --detector centreface.'
+                'Provide the model file there or use --detector centerface.'
             )
         detector = SCRFDdetector(
             model_path=default_scrfd_onnx_path,
-            device='cpu',
+            device='auto',
             override_execution_provider=execution_provider,
         )
-    elif args.detector == 'centreface':
+    elif args.detector == 'scrfd10g':
+        from deface.scrfd_detector import SCRFDdetector
+
+        scrfd_10g_onnx_path = f'{os.path.dirname(__file__)}/scrfd_10g.onnx'
+        if not os.path.isfile(scrfd_10g_onnx_path):
+            raise RuntimeError(
+                f'SCRFD 10G detector selected but model file not found at {scrfd_10g_onnx_path}. '
+                'Provide the model file there or use --detector centerface.'
+            )
+        detector = SCRFDdetector(
+            model_path=scrfd_10g_onnx_path,
+            device='auto',
+            override_execution_provider=execution_provider,
+        )
+    elif args.detector == 'centerface':
         from deface.centerface import CenterFace
 
         detector = CenterFace(
