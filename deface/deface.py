@@ -71,7 +71,9 @@ def draw_det(
                 color = (int(frame[y, x][0]), int(frame[y, x][1]), int(frame[y, x][2]))
                 cv2.rectangle(frame, pt1, pt2, color, -1)
     elif replacewith == 'none':
-        pass
+        # When in scores debug mode, draw bounding box rectangle
+        if draw_scores:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
     if draw_scores:
         cv2.putText(
             frame, f'{score:.2f}', (x1 + 0, y1 - 20),
@@ -299,6 +301,9 @@ def parse_cli_args():
         '--draw-scores', default=False, action='store_true',
         help='Draw detection scores onto outputs.')
     parser.add_argument(
+        '--scores', default=False, action='store_true',
+        help='Debug mode: draw bounding boxes with confidence scores instead of blurring faces.')
+    parser.add_argument(
         '--disable-progress-output', default=False, action='store_true',
         help='Disable video progress output to console.')
     parser.add_argument(
@@ -379,6 +384,11 @@ def main():
     keep_metadata = args.keep_metadata
     replaceimg = None
     disable_progress_output = args.disable_progress_output
+
+    # When --scores flag is used, override to draw boxes with confidence scores instead of blurring
+    if args.scores:
+        replacewith = 'none'
+        draw_scores = True
 
     if in_shape is not None:
         w, h = in_shape.split('x')
