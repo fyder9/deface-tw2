@@ -403,7 +403,7 @@ def main():
             override_execution_provider=execution_provider,
         )
     elif args.detector == 'scrfd10g':
-        from deface.scrfd_detector import SCRFDdetector
+        from deface.scrfd10g_detector import SCRFD10GDetector
 
         scrfd_10g_onnx_path = f'{os.path.dirname(__file__)}/scrfd_10g.onnx'
         if not os.path.isfile(scrfd_10g_onnx_path):
@@ -411,7 +411,7 @@ def main():
                 f'SCRFD 10G detector selected but model file not found at {scrfd_10g_onnx_path}. '
                 'Provide the model file there or use --detector centerface.'
             )
-        detector = SCRFDdetector(
+        detector = SCRFD10GDetector(
             model_path=scrfd_10g_onnx_path,
             device='auto',
             override_execution_provider=execution_provider,

@@ -67,38 +67,20 @@ class SCRFDdetector: #Low-level SCRFD ONNX runtime wrapper
                 img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
             return img
     
-    def resize_frame(self, frame: np.ndarray) -> tuple[np.ndarray, int, int, float, int, int]:
+    def resize_frame(self, frame: np.ndarray) -> tuple[np.ndarray, int, int, float, int ,int]:
         #Resize input frame to have its long side equal to cap_long_side while maintaining aspect ratio
         h, w = frame.shape[:2]
-        org_w, org_h = w, h
         longside = max(h, w)
-
-        # Resize if needed
         if longside > self.cap_long_side:
-            scale = self.cap_long_side / longside
+            scale = self.cap_long_side / max(h, w)
             new_w = int(w * scale)
             new_h = int(h * scale)
             frame = cv2.resize(frame, (new_w, new_h))
         else:
             scale = 1.0
-            new_w, new_h = w, h
-
-        # Align to stride=32 for FPN compatibility (SCRFD requirement)
-        stride = 32
-        padded_w = ((new_w + stride - 1) // stride) * stride
-        padded_h = ((new_h + stride - 1) // stride) * stride
-
-        # Apply padding only if necessary (bottom/right padding with black border)
-        if padded_w != new_w or padded_h != new_h:
-            pad_right = padded_w - new_w
-            pad_bottom = padded_h - new_h
-            frame = cv2.copyMakeBorder(
-                frame, 0, pad_bottom, 0, pad_right,
-                cv2.BORDER_CONSTANT, value=0
-            )
-
-        # Return padded dimensions for inference, original dimensions for decode
-        return frame, padded_w, padded_h, scale, org_w, org_h
+            return frame, w, h, scale, w, h
+        #returning resized or original frame
+        return frame, new_w , new_h, scale, w ,h
     
     def preprocess(self, img_rgb: np.ndarray) -> np.ndarray:
         #TODO:Convert input from RGB to BGR based on SCRFD requirements
