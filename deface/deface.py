@@ -41,7 +41,8 @@ def draw_det(
         draw_scores: bool = False,
         ovcolor: Tuple[int] = (0, 0, 0),
         replaceimg = None,
-        mosaicsize: int = 20
+        mosaicsize: int = 20,
+        is_tracked: bool = False
 ):
     if replacewith == 'solid':
         cv2.rectangle(frame, (x1, y1), (x2, y2), ovcolor, -1)
@@ -76,17 +77,21 @@ def draw_det(
     elif replacewith == 'none':
         # When in scores debug mode, draw bounding box rectangle
         if draw_scores:
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            color = (0, 255, 255) if is_tracked else (0, 255, 0)  # Yellow for tracked, green for fresh
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
     if draw_scores:
+        color = (0, 255, 255) if is_tracked else (0, 255, 0)  # Yellow for tracked, green for fresh
+        label = f'{score:.2f} (track)' if is_tracked else f'{score:.2f}'
         cv2.putText(
-            frame, f'{score:.2f}', (x1 + 0, y1 - 20),
-            cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 255, 0)
+            frame, label, (x1 + 0, y1 - 20),
+            cv2.FONT_HERSHEY_DUPLEX, 0.5, color
         )
 
 
 def anonymize_frame(
         dets, frame, mask_scale,
-        replacewith, ellipse, draw_scores, replaceimg, mosaicsize
+        replacewith, ellipse, draw_scores, replaceimg, mosaicsize,
+        original_dets_count: int = None
 ):
     for i, det in enumerate(dets):
         boxes, score = det[:4], det[4]
@@ -95,13 +100,18 @@ def anonymize_frame(
         # Clip bb coordinates to valid frame region
         y1, y2 = max(0, y1), min(frame.shape[0] - 1, y2)
         x1, x2 = max(0, x1), min(frame.shape[1] - 1, x2)
+
+        # Determine if this detection is gap-filled (tracked)
+        is_tracked = (original_dets_count is not None) and (i >= original_dets_count)
+
         draw_det(
             frame, score, i, x1, y1, x2, y2,
             replacewith=replacewith,
             ellipse=ellipse,
             draw_scores=draw_scores,
             replaceimg=replaceimg,
-            mosaicsize=mosaicsize
+            mosaicsize=mosaicsize,
+            is_tracked=is_tracked
         )
 
 
@@ -126,7 +136,14 @@ def video_detect(
         replaceimg = None,
         keep_audio: bool = False,
         mosaicsize: int = 20,
-        disable_progress_output = False
+        disable_progress_output = False,
+        enable_tracking: bool = False,
+        track_iou_threshold: float = 0.25,
+        track_dist_threshold: float = 1.5,
+        track_alpha: float = 0.65,
+        track_ttl: int = 10,
+        track_expansion: float = 0.05,
+        track_debug: bool = False
 ):
     try:
         if 'fps' in ffmpeg_config:
@@ -166,14 +183,39 @@ def video_detect(
             opath, format='FFMPEG', mode='I', **_ffmpeg_config
         )
 
+    # Initialize tracking if enabled
+    frame_idx = 0
+    tracker = None
+    if enable_tracking:
+        from deface.tracker import FaceTracker
+        tracker = FaceTracker(
+            iou_threshold=track_iou_threshold,
+            norm_dist_threshold=track_dist_threshold,
+            alpha=track_alpha,
+            ttl=track_ttl,
+            expansion_rate=track_expansion,
+            debug=track_debug
+        )
+        if not disable_progress_output:
+            print(f"[Tracking] Enabled with TTL={track_ttl}, IoU={track_iou_threshold}, "
+                  f"NormDist={track_dist_threshold}, Alpha={track_alpha}, Expansion={int(track_expansion*100)}%")
+
     for frame in read_iter:
-        # Perform network inference, get bb dets but discard landmark predictions
-        dets, _ = centerface(frame, threshold=threshold)
+        # Perform network inference, get bb dets and landmarks
+        dets, lms = centerface(frame, threshold=threshold)
+
+        # Track original detection count before augmentation
+        original_dets_count = len(dets)
+
+        # Apply tracking if enabled (injects gap-filled detections)
+        if tracker is not None:
+            dets, lms = tracker.update(dets, lms, frame_idx)
 
         anonymize_frame(
             dets, frame, mask_scale=mask_scale,
             replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
-            replaceimg=replaceimg, mosaicsize=mosaicsize
+            replaceimg=replaceimg, mosaicsize=mosaicsize,
+            original_dets_count=original_dets_count if tracker is not None else None
         )
 
         if opath is not None:
@@ -185,10 +227,20 @@ def video_detect(
                 cv2.destroyAllWindows()
                 break
         bar.update()
+        frame_idx += 1
+
     reader.close()
     if opath is not None:
         writer.close()
     bar.close()
+
+    # Print tracking statistics if enabled
+    if tracker is not None and not disable_progress_output:
+        stats = tracker.get_stats()
+        print(f"[Tracking] Stats: {stats['total_detections']} detections, "
+              f"{stats['total_tracks_created']} tracks created, "
+              f"{stats['frames_with_gaps_filled']} frames gap-filled, "
+              f"{stats['total_gap_fills']} total gap-fills")
 
 
 def image_detect(
@@ -325,6 +377,27 @@ def parse_cli_args():
         '--yolo-variant', default='v4', choices=['v4', 'v8'], metavar='VARIANT',
         help='YOLO model variant when using --detector yolo. "v4" uses yolov4.onnx, "v8" uses yolov8.onnx. Default: "v4".')
     parser.add_argument(
+        '--enable-tracking', default=False, action='store_true',
+        help='Enable face tracking to fill detection gaps (1-10 frames). Disabled by default.')
+    parser.add_argument(
+        '--track-iou', default=0.25, type=float, metavar='IOU',
+        help='IoU threshold for track-to-detection association. Default: 0.25.')
+    parser.add_argument(
+        '--track-distance', default=1.5, type=float, metavar='DIST',
+        help='Normalized distance threshold for track association (multiplier of box diagonal). Default: 1.5.')
+    parser.add_argument(
+        '--track-alpha', default=0.65, type=float, metavar='ALPHA',
+        help='EMA smoothing factor for track box updates (0-1, higher = more responsive). Default: 0.65.')
+    parser.add_argument(
+        '--track-ttl', default=10, type=int, metavar='TTL',
+        help='Track time-to-live: continue blurring for this many frames after detection loss, then delete. Default: 10.')
+    parser.add_argument(
+        '--track-expansion', default=0.05, type=float, metavar='EXPANSION',
+        help='Box expansion factor per miss during gap-filling (5% = 0.05 per side). Default: 0.05.')
+    parser.add_argument(
+        '--track-debug', default=False, action='store_true',
+        help='Enable debug output for tracking (prints matches and gap-fills per frame).')
+    parser.add_argument(
         '--keep-audio', '-k', default=False, action='store_true',
         help='Keep audio from video source file and copy it over to the output (only applies to videos).')
     parser.add_argument(
@@ -390,6 +463,15 @@ def main():
     keep_metadata = args.keep_metadata
     replaceimg = None
     disable_progress_output = args.disable_progress_output
+
+    # Tracking parameters
+    enable_tracking = args.enable_tracking
+    track_iou_threshold = args.track_iou
+    track_dist_threshold = args.track_distance
+    track_alpha = args.track_alpha
+    track_ttl = args.track_ttl
+    track_expansion = args.track_expansion
+    track_debug = args.track_debug
 
     # When --scores flag is used, override to draw boxes with confidence scores instead of blurring
     if args.scores:
@@ -500,7 +582,14 @@ def main():
                 ffmpeg_config=ffmpeg_config,
                 replaceimg=replaceimg,
                 mosaicsize=mosaicsize,
-                disable_progress_output=disable_progress_output
+                disable_progress_output=disable_progress_output,
+                enable_tracking=enable_tracking,
+                track_iou_threshold=track_iou_threshold,
+                track_dist_threshold=track_dist_threshold,
+                track_alpha=track_alpha,
+                track_ttl=track_ttl,
+                track_expansion=track_expansion,
+                track_debug=track_debug
             )
         elif filetype == 'image':
             image_detect(
