@@ -35,8 +35,9 @@ Backend:
 Models:
 - Original: CenterFace (face detection)
 - Added: SCRFD (high-accuracy face detector)
+- Added: YOLODetector (person detection with YOLOv4/v8)
 - Planned: license plate detector
-- Planned: person/head detectors (YOLO / RetinaNet class)
+- Planned: head detectors (RetinaNet class)
 
 Frontend:
 - Node.js server wrapper
@@ -92,19 +93,50 @@ So downstream blur pipeline stays unchanged.
 
 Per frame pipeline:
 
-resize → stride-align → preprocess → ONNX inference → decode → scale-back → clamp → NMS → return dets → blur masks
+resize → preprocess → ONNX inference → decode → scale-back → clamp → NMS → return dets → blur masks
 
 Important constraints:
 
-- SCRFD requires stride-aligned input (multiple of 32)
-- scale factor must be tracked for coordinate restoration
-- padded size is not equal to original size
-- decode must use:
-  - stride
-  - feature map dimensions
-  - anchor count
+**SCRFD-specific:**
+- requires stride-aligned input (multiple of 32)
+- scale factor tracked for coordinate restoration
+- padded size tracked separately
+
+**YOLO-specific:**
+- uses fixed 416×416 or 640×640 letterbox
+- constant padding (128) instead of stride-align
+- padding offsets (dw, dh) tracked for reversal
+- filters by person class (COCO class 0) only
+
+**Universal:**
+- decode must use stride, feature map dimensions, anchor count
 - NMS must operate on decoded pixel boxes
-- mask scaling supported (mask-scale argument)
+- mask scaling supported (--mask-scale argument)
+- all detectors return (Nx5 dets, Nx10 lms) format
+
+---
+
+## Model Storage & Organization
+
+All ONNX models are stored in centralized `/models` directory:
+
+```
+project-root/
+├── models/
+│   ├── scrfd_2.5g.onnx (3.1 MB)
+│   ├── scrfd_10g.onnx (15.5 MB)
+│   ├── yolov4.onnx (246 MB)
+│   ├── yolov4-tiny.onnx (23 MB)
+│   ├── yolov8.onnx (167 MB)
+│   └── centerface.onnx (7.0 MB)
+├── deface/
+└── [other files]
+```
+
+Model path resolution:
+- Files in deface/ use: `os.path.dirname(os.path.dirname(__file__)) / models / model.onnx`
+- Relative path traversal: deface/ → project_root/ → models/
+- Cross-platform compatible via `os.path.join()`
 
 ---
 
@@ -137,15 +169,22 @@ These debug prints must not be removed.
 
 CLI extensions added:
 
---detector <name>
---thresh <value>
---mask-scale <value>
+--detector <name>           # Choose detector backend
+--thresh <value>            # Detection confidence threshold
+--mask-scale <value>        # Scale factor for masks
+--yolo-variant <name>       # YOLO model variant (v4 or v8)
 
-Model variants supported:
-- scrfd2.5g
-- scrfd10g
+Detector choices:
+- scrfd2.5g (face detection, 3.1 MB)
+- scrfd10g (face detection, 15.5 MB)
+- centerface (face detection, 7.0 MB)
+- yolo (person detection, YOLOv4 or YOLOv8)
 
-Planned debug flag:
+YOLO variants:
+- v4 (default, 246 MB, faster)
+- v8 (experimental, 167 MB, newer architecture)
+
+Debug flags:
 
 --scores → draw boxes + scores instead of blur
 
@@ -157,7 +196,20 @@ CLI args must propagate into detector behavior and must not be ignored.
 
 Sensitive areas that must not be broken:
 
-- ONNX shape mismatch when SCRFD input not stride-aligned
+**SCRFD-specific:**
+- ONNX shape mismatch when input not stride-aligned
+- padding vs scaling coordinate errors
+- model output layout differences between SCRFD 2.5G and 10G
+
+**YOLO-specific:**
+- letterbox padding offset calculation (dw, dh must be integer divided by 2)
+- sigmoid + xy_scale formula in bbox decoding
+- exp(wh) * anchor multiplication order
+- class filtering (person class only, COCO class 0)
+- coordinate reversal after letterbox removal
+- YOLOv4 vs YOLOv8 output shape differences
+
+**Universal:**
 - decoding bugs from wrong feature map math
 - anchor indexing errors
 - score tensor dimensionality differences
@@ -165,29 +217,46 @@ Sensitive areas that must not be broken:
 - CUDA DLL dependency issues
 - DirectML vs CUDA confusion on Windows
 - Conda environment mismatch issues
-- model output layout differences between SCRFD variants
-- padding vs scaling coordinate errors
 - bounding box misalignment bugs
 
 Claude must preserve correctness in:
 
-- resize logic
+- resize logic (stride-aligned vs letterbox)
 - scale restoration
-- decode math
+- decode math (SCRFD offset vs YOLO sigmoid/exp)
 - provider selection logic
+- padding offset reversal
 
 ---
+
+## Detector Requirements & Specifications
+
+All detectors must:
+1. Accept frame in BGR (OpenCV format)
+2. Return `(dets, lms)` tuple:
+   - dets: (N, 5) array [x1, y1, x2, y2, score]
+   - lms: (N, 10) array [landmarks or zeros]
+3. Support threshold parameter in `__call__(frame, threshold)`
+4. Print GPU provider selection at init
+5. Handle GPU fallback (CUDA → DirectML → CPU)
+6. Preserve coordinate space (original frame dimensions)
+
+**YOLO Detector specifics:**
+- Input: RGB, normalized [0, 1], letterboxed to fixed size
+- Output: 3 scales with anchor predictions
+- Filters person class only (COCO class 0)
+- No landmarks (returns zeros for compatibility)
+- Supports multiple variants via --yolo-variant arg
 
 ## Future Model Expansion
 
 Planned detector additions:
 
 - license plate detector (ONNX)
-- person detector (YOLO / RetinaNet ONNX)
-- head detector
+- head detector (RetinaNet ONNX)
 - multi-class anonymization modes
 
-Detector abstraction must remain model-agnostic.
+Detector abstraction must remain model-agnostic and follow specs above.
 
 ---
 

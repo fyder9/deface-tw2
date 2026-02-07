@@ -322,6 +322,9 @@ def parse_cli_args():
         '--mosaicsize', default=20, type=int, metavar='width',
         help='Setting the mosaic size. Requires --replacewith mosaic option. Default: 20.')
     parser.add_argument(
+        '--yolo-variant', default='v4', choices=['v4', 'v8'], metavar='VARIANT',
+        help='YOLO model variant when using --detector yolo. "v4" uses yolov4.onnx, "v8" uses yolov8.onnx. Default: "v4".')
+    parser.add_argument(
         '--keep-audio', '-k', default=False, action='store_true',
         help='Keep audio from video source file and copy it over to the output (only applies to videos).')
     parser.add_argument(
@@ -432,7 +435,15 @@ def main():
     elif args.detector == 'yolo':
         from deface.yolo_detector import YOLODetector
 
-        yolo_onnx_path = os.path.join(_models_dir, 'yolov4.onnx')
+        # Determine which YOLO model to use based on variant
+        yolo_variant = args.yolo_variant.lower()
+        if yolo_variant == 'v8':
+            yolo_onnx_path = os.path.join(_models_dir, 'yolov8.onnx')
+            model_name = 'yolov8.onnx'
+        else:
+            yolo_onnx_path = os.path.join(_models_dir, 'yolov4.onnx')
+            model_name = 'yolov4.onnx'
+
         if not os.path.isfile(yolo_onnx_path):
             raise RuntimeError(
                 f'YOLO detector selected but model file not found at {yolo_onnx_path}. '
@@ -442,6 +453,7 @@ def main():
             model_path=yolo_onnx_path,
             device='auto',
             override_execution_provider=execution_provider,
+            variant=yolo_variant,
         )
     elif args.detector == 'centerface':
         from deface.centerface import CenterFace

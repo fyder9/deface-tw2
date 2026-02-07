@@ -8,28 +8,53 @@ class YOLODetector:
     YOLO-based person detector with ONNX Runtime GPU acceleration.
     Designed for detecting people in frames with high precision.
 
-    Input spec:
+    Supports both YOLOv4 and YOLOv8 models.
+
+    YOLOv4 Input spec:
     - Shape: (1, 416, 416, 3)
     - Format: RGB, float32, normalized [0, 1]
     - Letterboxed with constant padding (no stretching)
+    - NHWC format
 
-    Output spec:
+    YOLOv4 Output spec:
     - 3 output layers with shape (1, grid, grid, 3, 85)
     - 85 values per anchor: [x, y, w, h, objectness, class_probs(80)]
+
+    YOLOv8 Input spec:
+    - Shape: (1, 3, 640, 640)
+    - Format: RGB, float32, normalized [0, 1]
+    - Letterboxed with constant padding
+    - NCHW format
+
+    YOLOv8 Output spec:
+    - Single output layer with shape (1, 5, num_predictions)
+    - 5 values per prediction: [x, y, w, h, objectness]
     """
 
-    def __init__(self, model_path: str, device: str = "cpu", override_execution_provider: str = None):
+    def __init__(self, model_path: str, device: str = "cpu", override_execution_provider: str = None, variant: str = "v4"):
         import onnxruntime
 
-        self.input_size = 416
-        self.anchors = [
-            [(10, 13), (16, 30), (33, 23)],      # stride 32
-            [(30, 61), (62, 45), (59, 119)],     # stride 16
-            [(116, 90), (156, 198), (373, 326)]  # stride 8
-        ]
-        self.strides = [32, 16, 8]
+        self.variant = variant.lower()
+        if self.variant not in ["v4", "v8"]:
+            raise ValueError(f"Unsupported YOLO variant: {variant}. Use 'v4' or 'v8'.")
+
+        # Set model-specific parameters
+        if self.variant == "v4":
+            self.input_size = 416
+            self.anchors = [
+                [(10, 13), (16, 30), (33, 23)],      # stride 32
+                [(30, 61), (62, 45), (59, 119)],     # stride 16
+                [(116, 90), (156, 198), (373, 326)]  # stride 8
+            ]
+            self.strides = [32, 16, 8]
+        else:  # v8
+            self.input_size = 640
+            # YOLOv8 doesn't use explicit anchors; decode differently
+            self.anchors = None
+            self.strides = [8, 16, 32]
+
         self.num_classes = 80
-        self.xy_scale = 1.05  # xy scale factor in YOLO decoding
+        self.xy_scale = 1.05  # xy scale factor in YOLOv4 decoding
 
         available = onnxruntime.get_available_providers()
 
@@ -93,6 +118,9 @@ class YOLODetector:
         """
         Preprocess image for YOLO inference with letterboxing.
 
+        YOLOv4: Returns NHWC format (batch, H, W, 3)
+        YOLOv8: Returns NCHW format (batch, 3, H, W)
+
         Returns:
             (input_blob, resize_ratio, pad_w, pad_h)
         """
@@ -119,9 +147,15 @@ class YOLODetector:
         # Normalize to [0, 1]
         letterboxed_rgb = letterboxed_rgb / 255.0
 
-        # YOLO expects NHWC format for some implementations, but check model input
-        # Standard YOLO ONNX: (batch, height, width, channels) = NHWC
-        input_blob = np.expand_dims(letterboxed_rgb, axis=0).astype(np.float32)
+        # Format depends on model version
+        if self.variant == "v4":
+            # YOLOv4: NHWC format (batch, height, width, channels)
+            input_blob = np.expand_dims(letterboxed_rgb, axis=0).astype(np.float32)
+        else:
+            # YOLOv8: NCHW format (batch, channels, height, width)
+            # Transpose from HWC to CHW, then add batch dimension
+            input_blob = np.transpose(letterboxed_rgb, (2, 0, 1))
+            input_blob = np.expand_dims(input_blob, axis=0).astype(np.float32)
 
         return input_blob, resize_ratio, pad_w, pad_h
 
@@ -143,6 +177,55 @@ class YOLODetector:
     def _sigmoid(self, x):
         """Sigmoid activation"""
         return 1.0 / (1.0 + np.exp(-x))
+
+    def _decode_predictions_v8(self, output, org_h, org_w, resize_ratio, pad_w, pad_h):
+        """
+        Decode YOLOv8 output format.
+
+        YOLOv8 output shape: (batch, 5, num_predictions)
+        5 values: [x, y, w, h, objectness]
+
+        Returns:
+            List of [x1, y1, x2, y2, objectness] in original image coordinates
+        """
+        pixel_boxes = []
+
+        # Output shape: (1, 5, num_predictions)
+        batch_output = output[0]  # Shape: (5, num_predictions)
+        num_predictions = batch_output.shape[1]
+
+        for pred_idx in range(num_predictions):
+            x = float(batch_output[0, pred_idx])
+            y = float(batch_output[1, pred_idx])
+            w = float(batch_output[2, pred_idx])
+            h = float(batch_output[3, pred_idx])
+            objectness = float(batch_output[4, pred_idx])
+
+            # Convert center coordinates and dimensions to box
+            x1_letterbox = x - w / 2
+            y1_letterbox = y - h / 2
+            x2_letterbox = x + w / 2
+            y2_letterbox = y + h / 2
+
+            # Reverse letterbox padding
+            x1 = (x1_letterbox - pad_w) / resize_ratio
+            y1 = (y1_letterbox - pad_h) / resize_ratio
+            x2 = (x2_letterbox - pad_w) / resize_ratio
+            y2 = (y2_letterbox - pad_h) / resize_ratio
+
+            # Clip to original image bounds
+            x1 = max(0, min(x1, org_w - 1))
+            y1 = max(0, min(y1, org_h - 1))
+            x2 = max(0, min(x2, org_w - 1))
+            y2 = max(0, min(y2, org_h - 1))
+
+            # Skip invalid boxes
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            pixel_boxes.append([x1, y1, x2, y2, objectness])
+
+        return pixel_boxes
 
     def _decode_predictions(self, raw_pred, stride, anchors_for_stride):
         """
@@ -201,10 +284,12 @@ class YOLODetector:
 
     def decode_outputs(self, outputs, org_h, org_w, resize_ratio, pad_w, pad_h, score_thresh: float | None = None):
         """
-        Decode all YOLO output layers and convert to pixel coordinates.
+        Decode YOLO output layers and convert to pixel coordinates.
+
+        Handles both YOLOv4 (3 outputs) and YOLOv8 (1 output) formats.
 
         Args:
-            outputs: List of 3 raw outputs from model
+            outputs: List of raw outputs from model
             org_h, org_w: Original frame dimensions
             resize_ratio: Scale factor from original to resized
             pad_w, pad_h: Letterbox padding offsets
@@ -218,53 +303,59 @@ class YOLODetector:
 
         thresh = self.score_thresh if score_thresh is None else float(score_thresh)
 
-        # Process each output layer (stride 32, 16, 8)
-        for layer_idx, raw_output in enumerate(outputs):
-            stride = self.strides[layer_idx]
-            anchors_for_stride = self.anchors[layer_idx]
+        if self.variant == "v8":
+            # YOLOv8 has single output with shape (batch, 5, num_predictions)
+            pixel_boxes = self._decode_predictions_v8(outputs[0], org_h, org_w, resize_ratio, pad_w, pad_h)
+            # Filter by score threshold
+            pixel_boxes = [box for box in pixel_boxes if box[4] >= thresh]
+        else:
+            # YOLOv4 has 3 outputs (stride 32, 16, 8)
+            for layer_idx, raw_output in enumerate(outputs):
+                stride = self.strides[layer_idx]
+                anchors_for_stride = self.anchors[layer_idx]
 
-            predictions = self._decode_predictions(raw_output, stride, anchors_for_stride)
+                predictions = self._decode_predictions(raw_output, stride, anchors_for_stride)
 
-            for pred in predictions:
-                # Compute final score: objectness * max class probability
-                max_class_prob = float(np.max(pred['class_probs']))
-                score = pred['objectness'] * max_class_prob
+                for pred in predictions:
+                    # Compute final score: objectness * max class probability
+                    max_class_prob = float(np.max(pred['class_probs']))
+                    score = pred['objectness'] * max_class_prob
 
-                if score < thresh:
-                    continue
+                    if score < thresh:
+                        continue
 
-                # Filter by person class (class 0)
-                if int(np.argmax(pred['class_probs'])) != self.target_class_id:
-                    continue
+                    # Filter by person class (class 0)
+                    if int(np.argmax(pred['class_probs'])) != self.target_class_id:
+                        continue
 
-                # Convert xywh -> x1y1x2y2 in letterbox space
-                x_center = pred['x']
-                y_center = pred['y']
-                box_w = pred['w']
-                box_h = pred['h']
+                    # Convert xywh -> x1y1x2y2 in letterbox space
+                    x_center = pred['x']
+                    y_center = pred['y']
+                    box_w = pred['w']
+                    box_h = pred['h']
 
-                x1_letterbox = x_center - box_w / 2
-                y1_letterbox = y_center - box_h / 2
-                x2_letterbox = x_center + box_w / 2
-                y2_letterbox = y_center + box_h / 2
+                    x1_letterbox = x_center - box_w / 2
+                    y1_letterbox = y_center - box_h / 2
+                    x2_letterbox = x_center + box_w / 2
+                    y2_letterbox = y_center + box_h / 2
 
-                # Reverse letterbox padding
-                x1 = (x1_letterbox - pad_w) / resize_ratio
-                y1 = (y1_letterbox - pad_h) / resize_ratio
-                x2 = (x2_letterbox - pad_w) / resize_ratio
-                y2 = (y2_letterbox - pad_h) / resize_ratio
+                    # Reverse letterbox padding
+                    x1 = (x1_letterbox - pad_w) / resize_ratio
+                    y1 = (y1_letterbox - pad_h) / resize_ratio
+                    x2 = (x2_letterbox - pad_w) / resize_ratio
+                    y2 = (y2_letterbox - pad_h) / resize_ratio
 
-                # Clip to original image bounds
-                x1 = max(0, min(x1, org_w - 1))
-                y1 = max(0, min(y1, org_h - 1))
-                x2 = max(0, min(x2, org_w - 1))
-                y2 = max(0, min(y2, org_h - 1))
+                    # Clip to original image bounds
+                    x1 = max(0, min(x1, org_w - 1))
+                    y1 = max(0, min(y1, org_h - 1))
+                    x2 = max(0, min(x2, org_w - 1))
+                    y2 = max(0, min(y2, org_h - 1))
 
-                # Skip invalid boxes
-                if x2 <= x1 or y2 <= y1:
-                    continue
+                    # Skip invalid boxes
+                    if x2 <= x1 or y2 <= y1:
+                        continue
 
-                pixel_boxes.append([x1, y1, x2, y2, score])
+                    pixel_boxes.append([x1, y1, x2, y2, score])
 
         return pixel_boxes, pixel_lms
 

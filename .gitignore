@@ -109,4 +109,4 @@ ENV/
 .vscode/
 
 # models
-models/
+*.onnx
