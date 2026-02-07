@@ -18,7 +18,10 @@ from deface import __version__
 if TYPE_CHECKING:
     from deface.centerface import CenterFace
 
-default_scrfd_onnx_path = f'{os.path.dirname(__file__)}/scrfd_2.5g.onnx'
+# Models directory relative to project root
+_project_root = os.path.dirname(os.path.dirname(__file__))
+_models_dir = os.path.join(_project_root, 'models')
+default_scrfd_onnx_path = os.path.join(_models_dir, 'scrfd_2.5g.onnx')
 
 
 def scale_bb(x1, y1, x2, y2, mask_scale=1.0):
@@ -283,8 +286,8 @@ def parse_cli_args():
         '--output', '-o', default=None, metavar='O',
         help='Output file name. Defaults to input path + postfix "_anonymized".')
     parser.add_argument(
-        '--detector', default='scrfd2.5g', choices=['scrfd2.5g','scrfd10g', 'centerface'],
-        help='Face detector backend. Default: "scrfd2.5g".')
+        '--detector', default='scrfd2.5g', choices=['scrfd2.5g','scrfd10g', 'centerface', 'yolo'],
+        help='Detector backend. Default: "scrfd2.5g". Use "yolo" for person detection.')
     parser.add_argument(
         '--thresh', '-t', default=0.3, type=float, metavar='T',
         help='Detection threshold (tune this to trade off between false positive and false negative rate). Default: 0.3.')
@@ -415,7 +418,7 @@ def main():
     elif args.detector == 'scrfd10g':
         from deface.scrfd10g_detector import SCRFD10GDetector
 
-        scrfd_10g_onnx_path = f'{os.path.dirname(__file__)}/scrfd_10g.onnx'
+        scrfd_10g_onnx_path = os.path.join(_models_dir, 'scrfd_10g.onnx')
         if not os.path.isfile(scrfd_10g_onnx_path):
             raise RuntimeError(
                 f'SCRFD 10G detector selected but model file not found at {scrfd_10g_onnx_path}. '
@@ -423,6 +426,20 @@ def main():
             )
         detector = SCRFD10GDetector(
             model_path=scrfd_10g_onnx_path,
+            device='auto',
+            override_execution_provider=execution_provider,
+        )
+    elif args.detector == 'yolo':
+        from deface.yolo_detector import YOLODetector
+
+        yolo_onnx_path = os.path.join(_models_dir, 'yolov4.onnx')
+        if not os.path.isfile(yolo_onnx_path):
+            raise RuntimeError(
+                f'YOLO detector selected but model file not found at {yolo_onnx_path}. '
+                'Provide the model file there or use --detector centerface.'
+            )
+        detector = YOLODetector(
+            model_path=yolo_onnx_path,
             device='auto',
             override_execution_provider=execution_provider,
         )

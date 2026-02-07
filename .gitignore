@@ -108,3 +108,5 @@ ENV/
 # VS Code
 .vscode/
 
+# models
+models/

@@ -7,7 +7,9 @@ import cv2
 
 
 # Find file relative to the location of this code files
-default_onnx_path = f'{os.path.dirname(__file__)}/centerface.onnx'
+_project_root = os.path.dirname(os.path.dirname(__file__))
+_models_dir = os.path.join(_project_root, 'models')
+default_onnx_path = os.path.join(_models_dir, 'centerface.onnx')
 
 
 def ensure_rgb(img: np.ndarray) -> np.ndarray:
