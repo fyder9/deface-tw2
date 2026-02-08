@@ -4,7 +4,7 @@ import argparse
 import json
 import mimetypes
 import os
-from typing import Dict, Tuple, TYPE_CHECKING, Any
+from typing import Dict, Tuple, TYPE_CHECKING, Any, Optional
 
 import tqdm
 import skimage.draw
@@ -143,7 +143,16 @@ def video_detect(
         track_alpha: float = 0.65,
         track_ttl: int = 10,
         track_expansion: float = 0.05,
-        track_debug: bool = False
+        track_debug: bool = False,
+        enable_proximity_search: bool = False,
+        proximity_ttl: int = 10,
+        proximity_expand: float = 1.8,
+        proximity_thresh: Optional[float] = None,
+        proximity_iou: float = 0.15,
+        proximity_dist: float = 1.2,
+        proximity_area_min: float = 0.4,
+        proximity_area_max: float = 2.5,
+        proximity_debug: bool = False
 ):
     try:
         if 'fps' in ffmpeg_config:
@@ -200,11 +209,47 @@ def video_detect(
             print(f"[Tracking] Enabled with TTL={track_ttl}, IoU={track_iou_threshold}, "
                   f"NormDist={track_dist_threshold}, Alpha={track_alpha}, Expansion={int(track_expansion*100)}%")
 
+    # Initialize proximity search if enabled
+    proximity_search_mgr = None
+    if enable_proximity_search:
+        from deface.proximity_search import ProximitySearchManager, ProximitySearchConfig
+        # Use 0.8 * threshold if not specified
+        _proximity_thresh = proximity_thresh if proximity_thresh is not None else threshold * 0.8
+        config = ProximitySearchConfig(
+            proximity_ttl=proximity_ttl,
+            proximity_expand=proximity_expand,
+            proximity_thresh=_proximity_thresh,
+            proximity_iou=proximity_iou,
+            proximity_dist=proximity_dist,
+            proximity_area_min=proximity_area_min,
+            proximity_area_max=proximity_area_max,
+            debug=proximity_debug
+        )
+        proximity_search_mgr = ProximitySearchManager(centerface, config)
+        if not disable_progress_output:
+            print(f"[Proximity Search] Enabled with TTL={proximity_ttl}, "
+                  f"Expand={proximity_expand}x, Thresh={_proximity_thresh:.2f}")
+
     for frame in read_iter:
         # Perform network inference, get bb dets and landmarks
         dets, lms = centerface(frame, threshold=threshold)
 
-        # Track original detection count before augmentation
+        # Apply proximity search if enabled (reacquire missed faces via ROI detection)
+        if proximity_search_mgr is not None:
+            # Update confirmed face states from fresh detections
+            proximity_search_mgr.update_confirmed_detections(dets, lms, frame_idx)
+
+            # Attempt to reacquire missing confirmed faces
+            reacquired_dets, reacquired_lms = proximity_search_mgr.search_missing_faces(
+                frame, dets, frame_idx, threshold
+            )
+
+            # Merge reacquired detections with original
+            if len(reacquired_dets) > 0:
+                dets = np.vstack([dets, reacquired_dets])
+                lms = np.vstack([lms, reacquired_lms])
+
+        # Track original detection count before gap-filling augmentation
         original_dets_count = len(dets)
 
         # Apply tracking if enabled (injects gap-filled detections)
@@ -233,6 +278,13 @@ def video_detect(
     if opath is not None:
         writer.close()
     bar.close()
+
+    # Print proximity search statistics if enabled
+    if proximity_search_mgr is not None and not disable_progress_output:
+        stats = proximity_search_mgr.get_stats()
+        print(f"[Proximity Search] Stats: {stats['total_roi_searches']} ROI searches, "
+              f"{stats['successful_reacquisitions']} successful reacquisitions, "
+              f"{stats['failed_validations']} failed validations")
 
     # Print tracking statistics if enabled
     if tracker is not None and not disable_progress_output:
@@ -398,6 +450,33 @@ def parse_cli_args():
         '--track-debug', default=False, action='store_true',
         help='Enable debug output for tracking (prints matches and gap-fills per frame).')
     parser.add_argument(
+        '--enable-proximity-search', default=False, action='store_true',
+        help='Enable proximity search to reacquire missed faces via ROI-based detection. Default: disabled.')
+    parser.add_argument(
+        '--proximity-ttl', default=10, type=int, metavar='TTL',
+        help='Max frames since last confirmation to attempt proximity search. Default: 10.')
+    parser.add_argument(
+        '--proximity-expand', default=1.8, type=float, metavar='FACTOR',
+        help='ROI expansion factor around last confirmed box. Default: 1.8.')
+    parser.add_argument(
+        '--proximity-thresh', default=None, type=float, metavar='THRESH',
+        help='Detection threshold for proximity ROIs (None = 0.8 * main threshold). Default: None.')
+    parser.add_argument(
+        '--proximity-iou', default=0.15, type=float, metavar='IOU',
+        help='Minimum IoU with last confirmed box for validation. Default: 0.15.')
+    parser.add_argument(
+        '--proximity-dist', default=1.2, type=float, metavar='DIST',
+        help='Max normalized center distance for validation (× box diagonal). Default: 1.2.')
+    parser.add_argument(
+        '--proximity-area-min', default=0.4, type=float, metavar='MIN',
+        help='Min area ratio vs last confirmed box (reject too-small candidates). Default: 0.4.')
+    parser.add_argument(
+        '--proximity-area-max', default=2.5, type=float, metavar='MAX',
+        help='Max area ratio vs last confirmed box (reject too-large candidates). Default: 2.5.')
+    parser.add_argument(
+        '--proximity-debug', default=False, action='store_true',
+        help='Enable debug output for proximity search (prints per-frame stats).')
+    parser.add_argument(
         '--keep-audio', '-k', default=False, action='store_true',
         help='Keep audio from video source file and copy it over to the output (only applies to videos).')
     parser.add_argument(
@@ -472,6 +551,17 @@ def main():
     track_ttl = args.track_ttl
     track_expansion = args.track_expansion
     track_debug = args.track_debug
+
+    # Proximity search parameters
+    enable_proximity_search = args.enable_proximity_search
+    proximity_ttl = args.proximity_ttl
+    proximity_expand = args.proximity_expand
+    proximity_thresh = args.proximity_thresh
+    proximity_iou = args.proximity_iou
+    proximity_dist = args.proximity_dist
+    proximity_area_min = args.proximity_area_min
+    proximity_area_max = args.proximity_area_max
+    proximity_debug = args.proximity_debug
 
     # When --scores flag is used, override to draw boxes with confidence scores instead of blurring
     if args.scores:
@@ -589,7 +679,16 @@ def main():
                 track_alpha=track_alpha,
                 track_ttl=track_ttl,
                 track_expansion=track_expansion,
-                track_debug=track_debug
+                track_debug=track_debug,
+                enable_proximity_search=enable_proximity_search,
+                proximity_ttl=proximity_ttl,
+                proximity_expand=proximity_expand,
+                proximity_thresh=proximity_thresh,
+                proximity_iou=proximity_iou,
+                proximity_dist=proximity_dist,
+                proximity_area_min=proximity_area_min,
+                proximity_area_max=proximity_area_max,
+                proximity_debug=proximity_debug
             )
         elif filetype == 'image':
             image_detect(
