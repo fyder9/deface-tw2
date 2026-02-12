@@ -390,8 +390,8 @@ def parse_cli_args():
         '--output', '-o', default=None, metavar='O',
         help='Output file name. Defaults to input path + postfix "_anonymized".')
     parser.add_argument(
-        '--detector', default='scrfd2.5g', choices=['scrfd2.5g','scrfd10g', 'centerface', 'yolo'],
-        help='Detector backend. Default: "scrfd2.5g". Use "yolo" for person detection.')
+        '--detector', default='scrfd2.5g', choices=['scrfd2.5g','scrfd10g', 'centerface', 'yolo', 'crowdhuman'],
+        help='Detector backend. Default: "scrfd2.5g". Use "yolo" for person detection, "crowdhuman" for CrowdHuman-trained YOLOv5m.')
     parser.add_argument(
         '--thresh', '-t', default=0.3, type=float, metavar='T',
         help='Detection threshold (tune this to trade off between false positive and false negative rate). Default: 0.3.')
@@ -445,7 +445,7 @@ def parse_cli_args():
         help='Track time-to-live: continue blurring for this many frames after detection loss, then delete. Default: 10.')
     parser.add_argument(
         '--track-expansion', default=0.05, type=float, metavar='EXPANSION',
-        help='Box expansion factor per miss during gap-filling (5% = 0.05 per side). Default: 0.05.')
+        help='Box expansion factor per miss during gap-filling (5perc = 0.05 per side). Default: 0.05.')
     parser.add_argument(
         '--track-debug', default=False, action='store_true',
         help='Enable debug output for tracking (prints matches and gap-fills per frame).')
@@ -633,6 +633,20 @@ def main():
         detector = CenterFace(
             in_shape=in_shape,
             backend=backend,
+            override_execution_provider=execution_provider,
+        )
+    elif args.detector == 'crowdhuman':
+        from deface.crowdhuman_yolov5_detector import CrowdHumanYOLOv5Detector
+
+        crowdhuman_yolov5m_path = os.path.join(_models_dir, 'crowdhuman_yolov5m.onnx')
+        if not os.path.isfile(crowdhuman_yolov5m_path):
+            raise RuntimeError(
+                f'CrowdHuman YOLOv5m detector selected but model file not found at {crowdhuman_yolov5m_path}. '
+                'Provide the model file there or use --detector centerface.'
+            )
+        detector = CrowdHumanYOLOv5Detector(
+            model_path=crowdhuman_yolov5m_path,
+            device='auto',
             override_execution_provider=execution_provider,
         )
     else:
