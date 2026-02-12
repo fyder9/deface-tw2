@@ -51,74 +51,7 @@ To get an overview of usage and available options, run:
 
     $ deface -h
 
-The output may vary depending on your installed version, but it should look similar to this:
-
-```
-usage: deface [--output O] [--thresh T] [--scale WxH] [--preview] [--boxes]
-              [--draw-scores] [--mask-scale M]
-              [--replacewith {blur,solid,none,img,mosaic}]
-              [--replaceimg REPLACEIMG] [--mosaicsize width] [--keep-audio]
-              [--ffmpeg-config FFMPEG_CONFIG] [--backend {auto,onnxrt,opencv}]
-              [--execution-provider EP] [--version] [--help]
-              [input ...]
-
-Video anonymization by face detection
-
-positional arguments:
-  input                 File path(s) or camera device name. It is possible to
-                        pass multiple paths by separating them by spaces or by
-                        using shell expansion (e.g. `$ deface vids/*.mp4`).
-                        Alternatively, you can pass a directory as an input,
-                        in which case all files in the directory will be used
-                        as inputs. If a camera is installed, a live webcam
-                        demo can be started by running `$ deface cam` (which
-                        is a shortcut for `$ deface -p '<video0>'`.
-
-optional arguments:
-  --output O, -o O      Output file name. Defaults to input path + postfix
-                        "_anonymized".
-  --thresh T, -t T      Detection threshold (tune this to trade off between
-                        false positive and false negative rate). Default: 0.2.
-  --scale WxH, -s WxH   Downscale images for network inference to this size
-                        (format: WxH, example: --scale 640x360).
-  --preview, -p         Enable live preview GUI (can decrease performance).
-  --boxes               Use boxes instead of ellipse masks.
-  --draw-scores         Draw detection scores onto outputs.
-  --disable-progress-output
-                        Disable video progress output to console.
-  --mask-scale M        Scale factor for face masks, to make sure that masks
-                        cover the complete face. Default: 1.3.
-  --replacewith {blur,solid,none,img,mosaic}
-                        Anonymization filter mode for face regions. "blur"
-                        applies a strong gaussian blurring, "solid" draws a
-                        solid black box, "none" does leaves the input
-                        unchanged, "img" replaces the face with a custom image
-                        and "mosaic" replaces the face with mosaic. Default:
-                        "blur".
-  --replaceimg REPLACEIMG
-                        Anonymization image for face regions. Requires
-                        --replacewith img option.
-  --mosaicsize width    Setting the mosaic size. Requires --replacewith mosaic
-                        option. Default: 20.
-  --keep-audio, -k      Keep audio from video source file and copy it over to
-                        the output (only applies to videos).
-  --ffmpeg-config FFMPEG_CONFIG
-                        FFMPEG config arguments for encoding output videos.
-                        This argument is expected in JSON notation. For a list
-                        of possible options, refer to the ffmpeg-imageio docs.
-                        Default: '{"codec": "libx264"}'.
-  --backend {auto,onnxrt,opencv}
-                        Backend for ONNX model execution. Default: "auto"
-                        (prefer onnxrt if available).
-  --execution-provider EP, --ep EP
-                        Override onnxrt execution provider (see
-                        https://onnxruntime.ai/docs/execution-providers/). If
-                        not specified, the presumably fastest available one
-                        will be automatically selected. Only used if backend is
-                        onnxrt.
-  --version             Print version number and exit.
-  --help, -h            Show this help message and exit.
-```
+The full list of command-line arguments is comprehensive and includes detection, tracking, and anonymization options. See sections below for detailed information on specific features.
 
 ## Usage examples
 
@@ -217,13 +150,213 @@ OpenVINO can accelerate inference even on CPU-only systems by a few percent, com
 If you your setup doesn't fit with these recommendations, look into the available options at the [Execution Provider](https://onnxruntime.ai/docs/execution-providers/#summary-of-supported-execution-providers) documentation and find the respective installation instructions in the [ONNX Runtime build matrix](https://microsoft.github.io/onnxruntime/).
 
 
-## How it works
+## Face & Person Detection
 
-The included face detection system is based on CenterFace ([code](https://github.com/Star-Clouds/centerface), [paper](https://arxiv.org/abs/1911.03599)), a deep neural network optimized for fast but reliable detection of human faces in photos.
-The network was trained on the [WIDER FACE](http://shuoyang1213.me/WIDERFACE/) dataset, which contains annotated photos showing faces in a wide variety of scales, poses and occlusions.
+`deface` supports multiple detection backends. Select with `--detector`:
 
-Although the face detector is originally intended to be used for normal 2D images, `deface` can also use it to detect faces in video data by analyzing each video frame independently.
-The face bounding boxes predicted by the CenterFace detector are then used as masks to determine where to apply anonymization filters.
+```bash
+deface video.mp4 --detector <detector_name>
+```
+
+### Available Detectors
+
+| Detector | Size | Type | Speed | Best For |
+|----------|------|------|-------|----------|
+| `scrfd2.5g` (default) | 3.1 MB | Face | Very fast | Quick processing, low resources |
+| `scrfd10g` | 15.5 MB | Face | Fast | Best accuracy (production) |
+| `centerface` | 7.0 MB | Face | Fast | Legacy compatibility |
+| `yolo` | 246 MB | Person/body | Moderate | Full body detection |
+| `yolo --yolo-variant v8` | 167 MB | Person/body | Fast | Modern person detection |
+| `crowdhuman` | 80 MB | Person/head | Fast | Dense crowds, occlusions |
+
+**Threshold tuning** (`--thresh`, default 0.3):
+- Lower = more detections (more false positives)
+- Higher = fewer detections (more false negatives)
+- Use `--scores --preview` to visualize and tune
+
+**Example**: Detect crowds with visualization
+```bash
+deface video.mp4 --detector crowdhuman --thresh 0.4 --scores --preview
+```
+
+---
+
+## Temporal Tracking
+
+Enable temporal face tracking to maintain consistent anonymization across frames (useful for law enforcement CCTV):
+
+```bash
+deface video.mp4 --enable-tracking
+```
+
+**How it works**: Tracks faces across frames and fills gaps during temporary occlusions. Prevents flickering and maintains identity consistency.
+
+**Arguments**:
+```bash
+--enable-tracking               # Enable tracking
+--track-iou-threshold 0.3       # IoU threshold for matching (higher = stricter)
+--track-dist-threshold 50.0     # Max distance for matching (pixels)
+--track-alpha 0.3               # Smoothing (0 = off, 1 = full smoothing)
+--track-ttl 10                  # Frames to keep blurring after detection loss
+--track-expansion 0.05          # Box expansion per missed frame (5% per side)
+--track-debug                   # Print debug info
+```
+
+**Examples**:
+```bash
+# Strict matching (fewer tracking errors):
+deface video.mp4 --enable-tracking --track-iou-threshold 0.4 --track-ttl 5
+
+# Loose matching (longer memory for occlusions):
+deface video.mp4 --enable-tracking --track-iou-threshold 0.2 --track-ttl 20
+
+# Smooth motion:
+deface video.mp4 --enable-tracking --track-alpha 0.6
+```
+
+---
+
+## Proximity Search (ROI Re-detection)
+
+Re-scan regions near recently-seen faces to catch detections missed by the full-frame detector:
+
+```bash
+deface video.mp4 --enable-proximity-search
+```
+
+**How it works**: Crops regions around last-known faces and runs detector on those ROIs. Catches small, occluded, or edge-of-frame faces.
+
+**Arguments**:
+```bash
+--enable-proximity-search               # Enable proximity search
+--proximity-ttl 15                      # Max age of face box for ROI seeding (frames)
+--proximity-expand 2.0                  # ROI expansion (2.0 = 2× box size)
+--proximity-thresh <value>              # Min confidence for proximity detections
+--proximity-iou 0.1                     # Min IoU for position validation
+--proximity-dist 0.5                    # Max center distance (normalized)
+--proximity-area-min 10                 # Min box area to seed ROI (pixels)
+--proximity-area-max 10000              # Max box area to seed ROI
+--proximity-debug                       # Print debug info
+```
+
+**Examples**:
+```bash
+# Conservative (strict validation, small ROI):
+deface video.mp4 --enable-proximity-search --proximity-expand 1.5 --proximity-iou 0.2
+
+# Aggressive (loose validation, large ROI):
+deface video.mp4 --enable-proximity-search --proximity-expand 3.0 --proximity-iou 0.05
+
+# Combined with tracking:
+deface video.mp4 --enable-tracking --enable-proximity-search --track-ttl 15
+
+# Debug mode:
+deface video.mp4 --enable-proximity-search --proximity-debug --scores --preview
+```
+
+---
+
+## Command-Line Arguments Summary
+
+**Input/Output**:
+```
+input                   File path(s), directory, or 'cam' for webcam
+-o, --output FILE       Output file (default: input + "_anonymized")
+-k, --keep-audio        Keep audio track from input (videos only)
+```
+
+**Detection**:
+```
+--detector {scrfd2.5g,scrfd10g,centerface,yolo,crowdhuman}
+                        Detector choice (default: scrfd2.5g)
+-t, --thresh T          Detection threshold, 0.0-1.0 (default: 0.3)
+--yolo-variant {v4,v8}  YOLO variant (only with --detector yolo)
+--scores                Show detection boxes/scores instead of blurring
+```
+
+**Anonymization**:
+```
+--replacewith {blur,solid,none,img,mosaic}
+                        Filter type (default: blur)
+--boxes                 Use rectangular boxes instead of ellipse masks
+--mask-scale M          Mask scale factor (default: 1.3)
+--mosaicsize WIDTH      Mosaic size in pixels (default: 20, for --replacewith mosaic)
+--replaceimg IMAGE      Custom image for replacement (for --replacewith img)
+```
+
+**Display**:
+```
+-p, --preview           Live preview during processing
+--draw-scores           Draw scores on anonymized output
+--disable-progress-output   Hide progress bar
+```
+
+**Performance**:
+```
+-s, --scale WxH         Downscale for detection (e.g., 640x360)
+--backend {auto,onnxrt,opencv}
+                        Execution backend (default: auto)
+-ep, --execution-provider EP
+                        Force specific GPU provider (e.g., CUDAExecutionProvider)
+--ffmpeg-config JSON    FFmpeg encoding options
+```
+
+**Tracking** (see [Temporal Tracking](#temporal-tracking) section):
+```
+--enable-tracking
+--track-iou-threshold VALUE       (default: 0.3)
+--track-dist-threshold VALUE      (default: 50.0)
+--track-alpha VALUE               (default: 0.3)
+--track-ttl FRAMES                (default: 10)
+--track-expansion VALUE           (default: 0.05)
+--track-debug
+```
+
+**Proximity Search** (see [Proximity Search](#proximity-search-roi-re-detection) section):
+```
+--enable-proximity-search
+--proximity-ttl FRAMES            (default: 15)
+--proximity-expand FACTOR         (default: 2.0)
+--proximity-thresh VALUE
+--proximity-iou VALUE             (default: 0.1)
+--proximity-dist VALUE            (default: 0.5)
+--proximity-area-min PIXELS       (default: 10)
+--proximity-area-max PIXELS       (default: 10000)
+--proximity-debug
+```
+
+**Other**:
+```
+-h, --help              Show full help message
+--version               Show version
+```
+
+---
+
+## How It Works
+
+### Detection
+
+The default detector is **SCRFD** ([paper](https://arxiv.org/abs/2105.04714)), an anchor-free face detector optimized for speed and accuracy. SCRFD is available in two sizes (2.5G and 10G) with different accuracy/speed tradeoffs.
+
+Alternative detectors:
+- **CenterFace**: Original upstream detector ([paper](https://arxiv.org/abs/1911.03599))
+- **YOLO variants**: Person/body detection (YOLOv4, YOLOv8, CrowdHuman YOLOv5m)
+
+### Processing Pipeline
+
+For each frame:
+1. Preprocess (resize, normalize)
+2. Run neural network inference
+3. Post-process (NMS, threshold, coordinate conversion)
+4. Return bounding boxes
+5. Apply anonymization filter
+
+### Optional Features
+
+- **Tracking**: Maintains consistent anonymization across frames (gap-filling during occlusions)
+- **Proximity Search**: Re-detects faces in ROIs near recent detections
+- **Visualization**: Display detection scores for parameter tuning (`--scores`)
 
 
 ## Credits
