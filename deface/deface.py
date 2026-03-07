@@ -106,13 +106,28 @@ def draw_det(
 def anonymize_frame(
         dets, frame, mask_scale,
         replacewith, ellipse, draw_scores, replaceimg, mosaicsize,
-        original_dets_count: int = None
+        original_dets_count: int = None,
+        crowdhuman_filter: str = 'both'
 ):
     for i, det in enumerate(dets):
         boxes, score = det[:4], det[4]
 
         # Extract optional class_id (column 5, only for CrowdHuman detector)
         class_id = int(det[5]) if len(det) > 5 else None
+
+        # Class-based filter (only active when class_id is present, i.e. CrowdHuman)
+        if class_id is not None:
+            if crowdhuman_filter == 'heads' and class_id != 0:
+                continue
+            elif crowdhuman_filter == 'bodies' and class_id != 1:
+                continue
+            elif crowdhuman_filter == 'upperbody':
+                if class_id == 0:
+                    continue  # skip head boxes in upperbody mode
+                # class_id == 1: crop to upper 50% of body box BEFORE scale_bb
+                x1_raw, y1_raw, x2_raw, y2_raw = boxes.astype(int)
+                y2_raw = y1_raw + (y2_raw - y1_raw) // 2
+                boxes = np.array([x1_raw, y1_raw, x2_raw, y2_raw], dtype=np.float32)
 
         x1, y1, x2, y2 = boxes.astype(int)
         x1, y1, x2, y2 = scale_bb(x1, y1, x2, y2, mask_scale)
@@ -172,7 +187,8 @@ def video_detect(
         proximity_dist: float = 1.2,
         proximity_area_min: float = 0.4,
         proximity_area_max: float = 2.5,
-        proximity_debug: bool = False
+        proximity_debug: bool = False,
+        crowdhuman_filter: str = 'both'
 ):
     try:
         if 'fps' in ffmpeg_config:
@@ -280,7 +296,8 @@ def video_detect(
             dets, frame, mask_scale=mask_scale,
             replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
             replaceimg=replaceimg, mosaicsize=mosaicsize,
-            original_dets_count=original_dets_count if tracker is not None else None
+            original_dets_count=original_dets_count if tracker is not None else None,
+            crowdhuman_filter=crowdhuman_filter
         )
 
         if opath is not None:
@@ -328,6 +345,7 @@ def image_detect(
         keep_metadata: bool,
         replaceimg = None,
         mosaicsize: int = 20,
+        crowdhuman_filter: str = 'both',
 ):
     frame = iio.imread(ipath)
 
@@ -342,7 +360,8 @@ def image_detect(
     anonymize_frame(
         dets, frame, mask_scale=mask_scale,
         replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
-        replaceimg=replaceimg, mosaicsize=mosaicsize
+        replaceimg=replaceimg, mosaicsize=mosaicsize,
+        crowdhuman_filter=crowdhuman_filter
     )
 
     if enable_preview:
@@ -380,7 +399,8 @@ def get_anonymized_image(frame,
                          mask_scale: float,
                          ellipse: bool,
                          draw_scores: bool,
-                         replaceimg = None
+                         replaceimg = None,
+                         crowdhuman_filter: str = 'both'
                          ):
     """
     Method for getting an anonymized image without CLI
@@ -395,7 +415,8 @@ def get_anonymized_image(frame,
     anonymize_frame(
         dets, frame, mask_scale=mask_scale,
         replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
-        replaceimg=replaceimg
+        replaceimg=replaceimg,
+        crowdhuman_filter=crowdhuman_filter
     )
 
     return frame
@@ -497,6 +518,12 @@ def parse_cli_args():
         '--proximity-debug', default=False, action='store_true',
         help='Enable debug output for proximity search (prints per-frame stats).')
     parser.add_argument(
+        '--crowdhuman-filter', default='both',
+        choices=['heads', 'bodies', 'both', 'upperbody'],
+        help='CrowdHuman only: which detections to blur. '
+             '"heads" = class 0 only, "bodies" = class 1 only, '
+             '"both" = all (default), "upperbody" = body box cropped to top 50%%.')
+    parser.add_argument(
         '--keep-audio', '-k', default=False, action='store_true',
         help='Keep audio from video source file and copy it over to the output (only applies to videos).')
     parser.add_argument(
@@ -582,6 +609,9 @@ def main():
     proximity_area_min = args.proximity_area_min
     proximity_area_max = args.proximity_area_max
     proximity_debug = args.proximity_debug
+
+    # CrowdHuman class filter
+    crowdhuman_filter = args.crowdhuman_filter
 
     # When --scores flag is used, override to draw boxes with confidence scores instead of blurring
     if args.scores:
@@ -722,7 +752,8 @@ def main():
                 proximity_dist=proximity_dist,
                 proximity_area_min=proximity_area_min,
                 proximity_area_max=proximity_area_max,
-                proximity_debug=proximity_debug
+                proximity_debug=proximity_debug,
+                crowdhuman_filter=crowdhuman_filter
             )
         elif filetype == 'image':
             image_detect(
@@ -737,7 +768,8 @@ def main():
                 enable_preview=enable_preview,
                 keep_metadata=keep_metadata,
                 replaceimg=replaceimg,
-                mosaicsize=mosaicsize
+                mosaicsize=mosaicsize,
+                crowdhuman_filter=crowdhuman_filter
             )
         elif filetype is None:
             print(f'Can\'t determine file type of file {ipath}. Skipping...')
