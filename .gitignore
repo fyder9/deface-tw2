@@ -110,3 +110,6 @@ ENV/
 
 # models
 *.onnx
+
+# markdown files
+*.md

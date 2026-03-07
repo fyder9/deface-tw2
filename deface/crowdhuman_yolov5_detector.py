@@ -214,7 +214,7 @@ class CrowdHumanYOLOv5Detector:
 
         Returns:
             tuple: (pixel_boxes, pixel_lms)
-                - pixel_boxes: list of [x1, y1, x2, y2, score] in pixel coordinates
+                - pixel_boxes: list of [x1, y1, x2, y2, score, class_id] in pixel coordinates (class_id appended for CrowdHuman analysis)
                 - pixel_lms: empty list (no landmarks for person detector)
         """
         pixel_boxes = []
@@ -232,6 +232,7 @@ class CrowdHumanYOLOv5Detector:
                 x_center, y_center, w, h = pred[0:4]
                 objectness = pred[4]
                 class_probs = pred[5:85]
+                class_id = int(np.argmax(class_probs))
                 score = objectness * np.max(class_probs)
 
                 if score < thresh:
@@ -258,7 +259,7 @@ class CrowdHumanYOLOv5Detector:
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                pixel_boxes.append([x1, y1, x2, y2, float(score)])
+                pixel_boxes.append([x1, y1, x2, y2, float(score), float(class_id)])
 
         elif num_values == 7:
             # CrowdHuman-specific format: [x, y, w, h, confidence, class_id, ???]
@@ -266,6 +267,7 @@ class CrowdHumanYOLOv5Detector:
             for pred in predictions:
                 x_center, y_center, w, h = pred[0:4]
                 score = pred[4]
+                class_id = int(pred[5])  # Extract class_id from position 5
 
                 if score < thresh:
                     continue
@@ -291,13 +293,14 @@ class CrowdHumanYOLOv5Detector:
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                pixel_boxes.append([x1, y1, x2, y2, float(score)])
+                pixel_boxes.append([x1, y1, x2, y2, float(score), float(class_id)])
 
         elif num_values == 6:
             # Simplified format: [x, y, w, h, confidence, class_id]
             for pred in predictions:
                 x_center, y_center, w, h = pred[0:4]
                 score = pred[4]
+                class_id = int(pred[5])  # Extract class_id from position 5
 
                 if score < thresh:
                     continue
@@ -323,7 +326,7 @@ class CrowdHumanYOLOv5Detector:
                 if x2 <= x1 or y2 <= y1:
                     continue
 
-                pixel_boxes.append([x1, y1, x2, y2, float(score)])
+                pixel_boxes.append([x1, y1, x2, y2, float(score), float(class_id)])
 
         else:
             raise RuntimeError(
@@ -388,7 +391,8 @@ class CrowdHumanYOLOv5Detector:
 
         Returns:
             tuple: (dets, lms)
-                - dets: (N, 5) array [x1, y1, x2, y2, score] in pixel coordinates
+                - dets: (N, 6) array [x1, y1, x2, y2, score, class_id] in pixel coordinates
+                  Note: class_id appended for CrowdHuman head/body differentiation
                 - lms: (N, 10) array of zeros (no landmarks for person detector)
         """
         outputs, org_h, org_w, resize_ratio, pad_w, pad_h = self.infer(frame)
@@ -401,7 +405,8 @@ class CrowdHumanYOLOv5Detector:
         kept_boxes, kept_lms = self.nms(pixel_boxes, pixel_lms)
 
         # Convert to numpy arrays with correct shapes
-        dets = np.asarray(kept_boxes, dtype=np.float32) if kept_boxes else np.zeros((0, 5), np.float32)
+        # CrowdHuman returns 6 columns: [x1, y1, x2, y2, score, class_id]
+        dets = np.asarray(kept_boxes, dtype=np.float32) if kept_boxes else np.zeros((0, 6), np.float32)
         lms = np.asarray(kept_lms, dtype=np.float32) if kept_lms else np.zeros((0, 10), np.float32)
 
         return dets, lms

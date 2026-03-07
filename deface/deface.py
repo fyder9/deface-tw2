@@ -42,7 +42,8 @@ def draw_det(
         ovcolor: Tuple[int] = (0, 0, 0),
         replaceimg = None,
         mosaicsize: int = 20,
-        is_tracked: bool = False
+        is_tracked: bool = False,
+        class_id: int = None
 ):
     if replacewith == 'solid':
         cv2.rectangle(frame, (x1, y1), (x2, y2), ovcolor, -1)
@@ -81,7 +82,21 @@ def draw_det(
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
     if draw_scores:
         color = (0, 255, 255) if is_tracked else (0, 255, 0)  # Yellow for tracked, green for fresh
-        label = f'{score:.2f} (track)' if is_tracked else f'{score:.2f}'
+
+        # Build label with optional class_id
+        if class_id is not None:
+            # Color code by class_id: 0 (head) = red, 1 (body) = blue, other = magenta
+            if class_id == 0:
+                class_color = (0, 0, 255)  # Red for heads
+            elif class_id == 1:
+                class_color = (255, 0, 0)  # Blue for bodies
+            else:
+                class_color = (255, 0, 255)  # Magenta for other
+            label = f'{score:.2f} (c:{int(class_id)})'
+            color = class_color  # Use class color for label
+        else:
+            label = f'{score:.2f} (track)' if is_tracked else f'{score:.2f}'
+
         cv2.putText(
             frame, label, (x1 + 0, y1 - 20),
             cv2.FONT_HERSHEY_DUPLEX, 0.5, color
@@ -95,6 +110,10 @@ def anonymize_frame(
 ):
     for i, det in enumerate(dets):
         boxes, score = det[:4], det[4]
+
+        # Extract optional class_id (column 5, only for CrowdHuman detector)
+        class_id = int(det[5]) if len(det) > 5 else None
+
         x1, y1, x2, y2 = boxes.astype(int)
         x1, y1, x2, y2 = scale_bb(x1, y1, x2, y2, mask_scale)
         # Clip bb coordinates to valid frame region
@@ -111,7 +130,8 @@ def anonymize_frame(
             draw_scores=draw_scores,
             replaceimg=replaceimg,
             mosaicsize=mosaicsize,
-            is_tracked=is_tracked
+            is_tracked=is_tracked,
+            class_id=class_id
         )
 
 
