@@ -358,7 +358,7 @@ class CrowdHumanYOLOv5Detector:
         boxes = []
         scores = []
         for box in pixel_boxes:
-            x1, y1, x2, y2, score = box
+            x1, y1, x2, y2, score = box[:5]  # Extract first 5 values (ignore class_id)
             w = x2 - x1
             h = y2 - y1
             boxes.append([x1, y1, w, h])
