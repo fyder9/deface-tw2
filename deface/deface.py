@@ -115,19 +115,11 @@ def anonymize_frame(
         # Extract optional class_id (column 5, only for CrowdHuman detector)
         class_id = int(det[5]) if len(det) > 5 else None
 
-        # Class-based filter (only active when class_id is present, i.e. CrowdHuman)
-        if class_id is not None:
-            if crowdhuman_filter == 'heads' and class_id != 0:
-                continue
-            elif crowdhuman_filter == 'bodies' and class_id != 1:
-                continue
-            elif crowdhuman_filter == 'upperbody':
-                if class_id == 0:
-                    continue  # skip head boxes in upperbody mode
-                # class_id == 1: crop to upper 50% of body box BEFORE scale_bb
-                x1_raw, y1_raw, x2_raw, y2_raw = boxes.astype(int)
-                y2_raw = y1_raw + (y2_raw - y1_raw) // 2
-                boxes = np.array([x1_raw, y1_raw, x2_raw, y2_raw], dtype=np.float32)
+        # Upperbody crop: apply to all boxes when in upperbody mode
+        if crowdhuman_filter == 'upperbody' and class_id is not None:
+            x1_raw, y1_raw, x2_raw, y2_raw = boxes.astype(int)
+            y2_raw = y1_raw + (y2_raw - y1_raw) // 2
+            boxes = np.array([x1_raw, y1_raw, x2_raw, y2_raw], dtype=np.float32)
 
         x1, y1, x2, y2 = boxes.astype(int)
         x1, y1, x2, y2 = scale_bb(x1, y1, x2, y2, mask_scale)
@@ -519,10 +511,10 @@ def parse_cli_args():
         help='Enable debug output for proximity search (prints per-frame stats).')
     parser.add_argument(
         '--crowdhuman-filter', default='both',
-        choices=['heads', 'bodies', 'both', 'upperbody'],
-        help='CrowdHuman only: which detections to blur. '
-             '"heads" = class 0 only, "bodies" = class 1 only, '
-             '"both" = all (default), "upperbody" = body box cropped to top 50%%.')
+        choices=['both', 'upperbody'],
+        help='CrowdHuman only: blur mode. '
+             '"both" = blur all detections as-is (default), '
+             '"upperbody" = crop every detection box to its top 50%% before blurring.')
     parser.add_argument(
         '--keep-audio', '-k', default=False, action='store_true',
         help='Keep audio from video source file and copy it over to the output (only applies to videos).')
