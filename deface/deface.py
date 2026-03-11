@@ -170,6 +170,7 @@ def video_detect(
         track_alpha: float = 0.65,
         track_ttl: int = 10,
         track_expansion: float = 0.05,
+        track_confirm_window: int = 2,
         track_debug: bool = False,
         enable_proximity_search: bool = False,
         proximity_ttl: int = 10,
@@ -177,8 +178,7 @@ def video_detect(
         proximity_thresh: Optional[float] = None,
         proximity_iou: float = 0.15,
         proximity_dist: float = 1.2,
-        proximity_area_min: float = 0.4,
-        proximity_area_max: float = 2.5,
+        proximity_iou_assoc: float = 0.3,
         proximity_debug: bool = False,
         crowdhuman_filter: str = 'both'
 ):
@@ -231,6 +231,7 @@ def video_detect(
             alpha=track_alpha,
             ttl=track_ttl,
             expansion_rate=track_expansion,
+            confirmation_window=track_confirm_window,
             debug=track_debug
         )
         if not disable_progress_output:
@@ -249,8 +250,7 @@ def video_detect(
             proximity_thresh=_proximity_thresh,
             proximity_iou=proximity_iou,
             proximity_dist=proximity_dist,
-            proximity_area_min=proximity_area_min,
-            proximity_area_max=proximity_area_max,
+            proximity_iou_assoc=proximity_iou_assoc,
             debug=proximity_debug
         )
         proximity_search_mgr = ProximitySearchManager(centerface, config)
@@ -480,6 +480,9 @@ def parse_cli_args():
         '--track-expansion', default=0.05, type=float, metavar='EXPANSION',
         help='Box expansion factor per miss during gap-filling (5perc = 0.05 per side). Default: 0.05.')
     parser.add_argument(
+        '--track-confirm-window', default=2, type=int, metavar='WINDOW',
+        help='Consecutive detections required before track activates gap-filling (reduces false positives). Default: 2.')
+    parser.add_argument(
         '--track-debug', default=False, action='store_true',
         help='Enable debug output for tracking (prints matches and gap-fills per frame).')
     parser.add_argument(
@@ -501,11 +504,8 @@ def parse_cli_args():
         '--proximity-dist', default=1.2, type=float, metavar='DIST',
         help='Max normalized center distance for validation (× box diagonal). Default: 1.2.')
     parser.add_argument(
-        '--proximity-area-min', default=0.4, type=float, metavar='MIN',
-        help='Min area ratio vs last confirmed box (reject too-small candidates). Default: 0.4.')
-    parser.add_argument(
-        '--proximity-area-max', default=2.5, type=float, metavar='MAX',
-        help='Max area ratio vs last confirmed box (reject too-large candidates). Default: 2.5.')
+        '--proximity-iou-assoc', default=0.3, type=float, metavar='IOU',
+        help='Minimum IoU for confirming detected face matches prior detections in proximity search. Default: 0.3.')
     parser.add_argument(
         '--proximity-debug', default=False, action='store_true',
         help='Enable debug output for proximity search (prints per-frame stats).')
@@ -589,6 +589,7 @@ def main():
     track_alpha = args.track_alpha
     track_ttl = args.track_ttl
     track_expansion = args.track_expansion
+    track_confirm_window = args.track_confirm_window
     track_debug = args.track_debug
 
     # Proximity search parameters
@@ -598,8 +599,7 @@ def main():
     proximity_thresh = args.proximity_thresh
     proximity_iou = args.proximity_iou
     proximity_dist = args.proximity_dist
-    proximity_area_min = args.proximity_area_min
-    proximity_area_max = args.proximity_area_max
+    proximity_iou_assoc = args.proximity_iou_assoc
     proximity_debug = args.proximity_debug
 
     # CrowdHuman class filter
@@ -735,6 +735,7 @@ def main():
                 track_alpha=track_alpha,
                 track_ttl=track_ttl,
                 track_expansion=track_expansion,
+                track_confirm_window=track_confirm_window,
                 track_debug=track_debug,
                 enable_proximity_search=enable_proximity_search,
                 proximity_ttl=proximity_ttl,
@@ -742,8 +743,7 @@ def main():
                 proximity_thresh=proximity_thresh,
                 proximity_iou=proximity_iou,
                 proximity_dist=proximity_dist,
-                proximity_area_min=proximity_area_min,
-                proximity_area_max=proximity_area_max,
+                proximity_iou_assoc=proximity_iou_assoc,
                 proximity_debug=proximity_debug,
                 crowdhuman_filter=crowdhuman_filter
             )

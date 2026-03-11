@@ -245,7 +245,6 @@ def validate_candidate(candidate_box: np.ndarray, candidate_score: float,
     Gates (all must pass):
         1. Score: candidate_score >= proximity_thresh
         2. Position: IoU >= proximity_iou OR center_distance <= proximity_dist * diagonal
-        3. Size: area_ratio in [proximity_area_min, proximity_area_max]
 
     Args:
         candidate_box: [x1, y1, x2, y2] detected in ROI
@@ -273,11 +272,6 @@ def validate_candidate(candidate_box: np.ndarray, candidate_score: float,
     # Position validation failed
     return False
 
-    # Note: Size validation is disabled in favor of position validation alone.
-    # Including both creates double-jeopardy effects where candidates fail
-    # position validation (they're in a different place) and then also fail
-    # size validation (they're not the right size). This is overly restrictive.
-
 
 # =============================================================================
 # Configuration & State
@@ -291,8 +285,7 @@ class ProximitySearchConfig:
     proximity_thresh: float = 0.3
     proximity_iou: float = 0.15
     proximity_dist: float = 1.2
-    proximity_area_min: float = 0.4
-    proximity_area_max: float = 2.5
+    proximity_iou_assoc: float = 0.3
     debug: bool = False
 
 
@@ -394,7 +387,7 @@ class ProximitySearchManager:
         for iou, d_idx, f_idx in candidates:
             if d_idx in used_dets or f_idx in used_faces:
                 continue
-            if iou >= 0.3:  # Minimum IoU for association
+            if iou >= self.config.proximity_iou_assoc:  # Minimum IoU for association
                 matches.append((d_idx, f_idx))
                 used_dets.add(d_idx)
                 used_faces.add(f_idx)
@@ -464,7 +457,7 @@ class ProximitySearchManager:
             # Mark matched faces
             for d_idx in range(len(current_dets)):
                 for f_idx, face in enumerate(confirmed_list):
-                    if iou_matrix[d_idx, f_idx] >= 0.3:
+                    if iou_matrix[d_idx, f_idx] >= self.config.proximity_iou_assoc:
                         matched_face_ids.add(face.id)
 
         # Search for missing faces

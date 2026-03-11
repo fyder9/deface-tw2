@@ -41,6 +41,7 @@ class Track:
         self.score = float(score)
         self.misses = 0
         self.last_seen_frame = frame_idx
+        self.confirmation_count = 1  # Count of consecutive detections (confirmation window)
 
     def update(self, box: np.ndarray, lms: np.ndarray, score: float,
                frame_idx: int, alpha: float):
@@ -66,6 +67,7 @@ class Track:
         self.score = float(score)
         self.misses = 0
         self.last_seen_frame = frame_idx
+        self.confirmation_count += 1  # Increment confirmation counter
 
     def mark_miss(self, frame_idx: int, expansion_rate: float = 0.05,
                   max_expansion: float = 1.20):
@@ -116,6 +118,18 @@ class Track:
     def is_alive(self, ttl: int) -> bool:
         """Check if track is still active (within TTL)."""
         return self.misses <= ttl
+
+    def is_confirmed(self, confirmation_window: int = 2) -> bool:
+        """
+        Check if track has been confirmed (seen in at least confirmation_window consecutive frames).
+
+        Args:
+            confirmation_window: Minimum consecutive detections required (default: 2)
+
+        Returns:
+            True if confirmation_count >= confirmation_window, False otherwise
+        """
+        return self.confirmation_count >= confirmation_window
 
     def to_detection(self) -> np.ndarray:
         """Convert track to detection format [x1, y1, x2, y2, score]."""
@@ -255,7 +269,11 @@ def associate_detections_to_tracks(detections: np.ndarray,
             used_tracks.add(t_idx)
 
     # Fallback matching: normalized distance-based for remaining pairs
-    for iou, norm_dist, d_idx, t_idx in candidates:
+    # Sort remaining candidates by normalized distance (ascending) for best fallback matching
+    fallback_candidates = [c for c in candidates if c[2] not in used_dets and c[3] not in used_tracks]
+    fallback_candidates.sort(key=lambda x: x[1])  # Sort by norm_dist ascending
+
+    for iou, norm_dist, d_idx, t_idx in fallback_candidates:
         if d_idx in used_dets or t_idx in used_tracks:
             continue
 
@@ -283,6 +301,7 @@ class FaceTracker:
         alpha: EMA smoothing factor for boxes (default: 0.65)
         ttl: Time-to-live for gap-filling (default: 10 frames)
         expansion_rate: Box expansion per miss (default: 0.05 = 5%)
+        confirmation_window: Consecutive detections required before gap-fill activates (default: 2)
         debug: Enable debug logging (default: False)
     """
 
@@ -292,12 +311,14 @@ class FaceTracker:
                  alpha: float = 0.65,
                  ttl: int = 10,
                  expansion_rate: float = 0.05,
+                 confirmation_window: int = 2,
                  debug: bool = False):
         self.iou_threshold = iou_threshold
         self.norm_dist_threshold = norm_dist_threshold
         self.alpha = alpha
         self.ttl = ttl
         self.expansion_rate = expansion_rate
+        self.confirmation_window = confirmation_window
         self.debug = debug
 
         self.tracks = []
@@ -363,11 +384,12 @@ class FaceTracker:
         for track_idx in unmatched_tracks:
             self.tracks[track_idx].mark_miss(frame_idx, self.expansion_rate)
 
-        # Step 5: Collect gap-filled tracks (within TTL but missed this frame)
+        # Step 5: Collect gap-filled tracks (within TTL, confirmed, and missed this frame)
         gap_filled_tracks = []
         gap_filled_indices = []
         for track_idx, track in enumerate(self.tracks):
-            if track.misses > 0 and track.is_alive(self.ttl):
+            if (track.misses > 0 and track.is_alive(self.ttl) and
+                    track.is_confirmed(self.confirmation_window)):
                 gap_filled_tracks.append(track)
                 gap_filled_indices.append(track_idx)
 
