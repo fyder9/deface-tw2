@@ -423,8 +423,8 @@ def parse_cli_args():
         '--output', '-o', default=None, metavar='O',
         help='Output file name. Defaults to input path + postfix "_anonymized".')
     parser.add_argument(
-        '--detector', default='scrfd2.5g', choices=['scrfd2.5g','scrfd10g', 'centerface', 'yolo', 'crowdhuman'],
-        help='Detector backend. Default: "scrfd2.5g". Use "yolo" for person detection, "crowdhuman" for CrowdHuman-trained YOLOv5m.')
+        '--detector', default='scrfd2.5g', choices=['scrfd2.5g','scrfd10g', 'centerface', 'crowdhuman'],
+        help='Detector backend. Default: "scrfd2.5g". Use "crowdhuman" for CrowdHuman-trained YOLOv5m.')
     parser.add_argument(
         '--thresh', '-t', default=0.3, type=float, metavar='T',
         help='Detection threshold (tune this to trade off between false positive and false negative rate). Default: 0.3.')
@@ -458,9 +458,6 @@ def parse_cli_args():
     parser.add_argument(
         '--mosaicsize', default=20, type=int, metavar='width',
         help='Setting the mosaic size. Requires --replacewith mosaic option. Default: 20.')
-    parser.add_argument(
-        '--yolo-variant', default='v4', choices=['v4', 'v8'], metavar='VARIANT',
-        help='YOLO model variant when using --detector yolo. "v4" uses yolov4.onnx, "v8" uses yolov8.onnx. Default: "v4".')
     parser.add_argument(
         '--enable-tracking', default=False, action='store_true',
         help='Enable face tracking to fill detection gaps (1-10 frames). Disabled by default.')
@@ -645,29 +642,6 @@ def main():
             model_path=scrfd_10g_onnx_path,
             device='auto',
             override_execution_provider=execution_provider,
-        )
-    elif args.detector == 'yolo':
-        from deface.yolo_detector import YOLODetector
-
-        # Determine which YOLO model to use based on variant
-        yolo_variant = args.yolo_variant.lower()
-        if yolo_variant == 'v8':
-            yolo_onnx_path = os.path.join(_models_dir, 'yolov8.onnx')
-            model_name = 'yolov8.onnx'
-        else:
-            yolo_onnx_path = os.path.join(_models_dir, 'yolov4.onnx')
-            model_name = 'yolov4.onnx'
-
-        if not os.path.isfile(yolo_onnx_path):
-            raise RuntimeError(
-                f'YOLO detector selected but model file not found at {yolo_onnx_path}. '
-                'Provide the model file there or use --detector centerface.'
-            )
-        detector = YOLODetector(
-            model_path=yolo_onnx_path,
-            device='auto',
-            override_execution_provider=execution_provider,
-            variant=yolo_variant,
         )
     elif args.detector == 'centerface':
         from deface.centerface import CenterFace
