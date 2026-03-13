@@ -618,12 +618,9 @@ def main():
     # TODO: scalar downscaling setting (-> in_shape), preserving aspect ratio
     if args.detector == 'scrfd2.5g':
         from deface.scrfd_detector import SCRFDdetector
+        from deface.model_downloader import ensure_model_present
 
-        if not os.path.isfile(default_scrfd_onnx_path):
-            raise RuntimeError(
-                f'SCRFD detector selected but default model file not found at {default_scrfd_onnx_path}. '
-                'Provide the model file there or use --detector centerface.'
-            )
+        default_scrfd_onnx_path = ensure_model_present('scrfd2.5g', _models_dir)
         detector = SCRFDdetector(
             model_path=default_scrfd_onnx_path,
             device='auto',
@@ -631,13 +628,9 @@ def main():
         )
     elif args.detector == 'scrfd10g':
         from deface.scrfd10g_detector import SCRFD10GDetector
+        from deface.model_downloader import ensure_model_present
 
-        scrfd_10g_onnx_path = os.path.join(_models_dir, 'scrfd_10g.onnx')
-        if not os.path.isfile(scrfd_10g_onnx_path):
-            raise RuntimeError(
-                f'SCRFD 10G detector selected but model file not found at {scrfd_10g_onnx_path}. '
-                'Provide the model file there or use --detector centerface.'
-            )
+        scrfd_10g_onnx_path = ensure_model_present('scrfd10g', _models_dir)
         detector = SCRFD10GDetector(
             model_path=scrfd_10g_onnx_path,
             device='auto',
@@ -653,13 +646,9 @@ def main():
         )
     elif args.detector == 'crowdhuman':
         from deface.crowdhuman_yolov5_detector import CrowdHumanYOLOv5Detector
+        from deface.model_downloader import ensure_model_present
 
-        crowdhuman_yolov5m_path = os.path.join(_models_dir, 'crowdhuman_yolov5m.onnx')
-        if not os.path.isfile(crowdhuman_yolov5m_path):
-            raise RuntimeError(
-                f'CrowdHuman YOLOv5m detector selected but model file not found at {crowdhuman_yolov5m_path}. '
-                'Provide the model file there or use --detector centerface.'
-            )
+        crowdhuman_yolov5m_path = ensure_model_present('crowdhuman', _models_dir)
         detector = CrowdHumanYOLOv5Detector(
             model_path=crowdhuman_yolov5m_path,
             device='auto',
