@@ -113,3 +113,6 @@ ENV/
 
 # markdown files
 *.md
+
+#CLAUDE context
+CLAUDE.md
