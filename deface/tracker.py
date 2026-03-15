@@ -131,9 +131,23 @@ class Track:
         """
         return self.confirmation_count >= confirmation_window
 
-    def to_detection(self) -> np.ndarray:
-        """Convert track to detection format [x1, y1, x2, y2, score]."""
-        return np.concatenate([self.box, [self.score]])
+    def to_detection(self, num_cols: int = 5) -> np.ndarray:
+        """
+        Convert track to detection format.
+
+        Args:
+            num_cols: Number of output columns (default 5 for [x1, y1, x2, y2, score]).
+                     Extra columns are padded with zeros for compatibility with multi-column detectors.
+
+        Returns:
+            Detection array with shape (num_cols,) where extra columns are zeros.
+        """
+        det = np.concatenate([self.box, [self.score]])
+        if num_cols > 5:
+            # Pad with zeros for extra columns (e.g., class_id from CrowdHuman)
+            padding = np.zeros(num_cols - 5, dtype=np.float32)
+            det = np.concatenate([det, padding])
+        return det
 
 
 def calculate_iou(box1: np.ndarray, box2: np.ndarray) -> float:
@@ -340,12 +354,13 @@ class FaceTracker:
         Update tracker with new detections.
 
         Args:
-            detections: Nx5 array [x1, y1, x2, y2, score] in original frame pixel coordinates
+            detections: Nx5+ array [x1, y1, x2, y2, score, ...] in original frame pixel coordinates
+                       Extra columns (e.g., class_id from CrowdHuman) are preserved
             landmarks: Nx10 array (can be zeros for YOLO or detectors without landmarks)
             frame_idx: Current frame number
 
         Returns:
-            augmented_dets: Nx5 array including gap-filled tracks
+            augmented_dets: Nx(5+) array including gap-filled tracks (5+ columns depending on input)
             augmented_lms: Nx10 array corresponding to augmented_dets
         """
         self.frame_idx = frame_idx
@@ -412,15 +427,19 @@ class FaceTracker:
         augmented_dets = list(detections)
         augmented_lms = list(landmarks) if len(landmarks) > 0 else []
 
+        # Determine column count from input detections (handles multi-column detectors like CrowdHuman)
+        num_det_cols = detections.shape[1] if len(detections) > 0 else 5
+
         for track in gap_filled_tracks:
-            augmented_dets.append(track.to_detection())
+            gap_det = track.to_detection(num_cols=num_det_cols)
+            augmented_dets.append(gap_det)
             augmented_lms.append(track.lms)
 
         # Convert to numpy arrays
         if len(augmented_dets) > 0:
             augmented_dets = np.array(augmented_dets, dtype=np.float32)
         else:
-            augmented_dets = np.zeros((0, 5), dtype=np.float32)
+            augmented_dets = np.zeros((0, num_det_cols), dtype=np.float32)
 
         if len(augmented_lms) > 0:
             augmented_lms = np.array(augmented_lms, dtype=np.float32)
