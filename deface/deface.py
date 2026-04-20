@@ -150,7 +150,7 @@ def cam_read_iter(reader):
 def video_detect(
         ipath: str,
         opath: str,
-        centerface: Any,
+        detector: Any,
         threshold: float,
         enable_preview: bool,
         cam: bool,
@@ -253,14 +253,14 @@ def video_detect(
             proximity_iou_assoc=proximity_iou_assoc,
             debug=proximity_debug
         )
-        proximity_search_mgr = ProximitySearchManager(centerface, config)
+        proximity_search_mgr = ProximitySearchManager(detector, config)
         if not disable_progress_output:
             print(f"[Proximity Search] Enabled with TTL={proximity_ttl}, "
                   f"Expand={proximity_expand}x, Thresh={_proximity_thresh:.2f}")
 
     for frame in read_iter:
         # Perform network inference, get bb dets and landmarks
-        dets, lms = centerface(frame, threshold=threshold)
+        dets, lms = detector(frame, threshold=threshold)
 
         # Apply proximity search if enabled (reacquire missed faces via ROI detection)
         if proximity_search_mgr is not None:
@@ -327,7 +327,7 @@ def video_detect(
 def image_detect(
         ipath: str,
         opath: str,
-        centerface: Any,
+        detector: Any,
         threshold: float,
         replacewith: str,
         mask_scale: float,
@@ -347,7 +347,7 @@ def image_detect(
         exif_dict = metadata.get("exif", None)
 
     # Perform network inference, get bb dets but discard landmark predictions
-    dets, _ = centerface(frame, threshold=threshold)
+    dets, _ = detector(frame, threshold=threshold)
 
     anonymize_frame(
         dets, frame, mask_scale=mask_scale,
