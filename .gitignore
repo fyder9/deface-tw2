@@ -108,4 +108,11 @@ ENV/
 # VS Code
 .vscode/
 
-deface/_version.py
+# models
+*.onnx
+
+# markdown files
+*.md
+
+#CLAUDE context
+CLAUDE.md

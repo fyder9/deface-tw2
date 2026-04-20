@@ -4,18 +4,24 @@ import argparse
 import json
 import mimetypes
 import os
-from typing import Dict, Tuple
+from typing import Dict, Tuple, TYPE_CHECKING, Any, Optional
 
 import tqdm
 import skimage.draw
 import numpy as np
 import imageio
 import imageio.v2 as iio
-import imageio.plugins.ffmpeg
 import cv2
 
 from deface import __version__
-from deface.centerface import CenterFace
+
+if TYPE_CHECKING:
+    from deface.centerface import CenterFace
+
+# Models directory relative to project root
+_project_root = os.path.dirname(os.path.dirname(__file__))
+_models_dir = os.path.join(_project_root, 'models')
+default_scrfd_onnx_path = os.path.join(_models_dir, 'scrfd_2.5g.onnx')
 
 
 def scale_bb(x1, y1, x2, y2, mask_scale=1.0):
@@ -35,7 +41,9 @@ def draw_det(
         draw_scores: bool = False,
         ovcolor: Tuple[int] = (0, 0, 0),
         replaceimg = None,
-        mosaicsize: int = 20
+        mosaicsize: int = 20,
+        is_tracked: bool = False,
+        class_id: int = None
 ):
     if replacewith == 'solid':
         cv2.rectangle(frame, (x1, y1), (x2, y2), ovcolor, -1)
@@ -68,32 +76,69 @@ def draw_det(
                 color = (int(frame[y, x][0]), int(frame[y, x][1]), int(frame[y, x][2]))
                 cv2.rectangle(frame, pt1, pt2, color, -1)
     elif replacewith == 'none':
-        pass
+        # When in scores debug mode, draw bounding box rectangle
+        if draw_scores:
+            color = (0, 255, 255) if is_tracked else (0, 255, 0)  # Yellow for tracked, green for fresh
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
     if draw_scores:
+        color = (0, 255, 255) if is_tracked else (0, 255, 0)  # Yellow for tracked, green for fresh
+
+        # Build label with optional class_id
+        if class_id is not None:
+            # Color code by class_id: 0 (head) = red, 1 (body) = blue, other = magenta
+            if class_id == 0:
+                class_color = (0, 0, 255)  # Red for heads
+            elif class_id == 1:
+                class_color = (255, 0, 0)  # Blue for bodies
+            else:
+                class_color = (255, 0, 255)  # Magenta for other
+            label = f'{score:.2f} (c:{int(class_id)})'
+            color = class_color  # Use class color for label
+        else:
+            label = f'{score:.2f} (track)' if is_tracked else f'{score:.2f}'
+
         cv2.putText(
-            frame, f'{score:.2f}', (x1 + 0, y1 - 20),
-            cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 255, 0)
+            frame, label, (x1 + 0, y1 - 20),
+            cv2.FONT_HERSHEY_DUPLEX, 0.5, color
         )
 
 
 def anonymize_frame(
         dets, frame, mask_scale,
-        replacewith, ellipse, draw_scores, replaceimg, mosaicsize
+        replacewith, ellipse, draw_scores, replaceimg, mosaicsize,
+        original_dets_count: int = None,
+        crowdhuman_filter: str = 'both'
 ):
     for i, det in enumerate(dets):
         boxes, score = det[:4], det[4]
+
+        # Extract optional class_id (column 5, only for CrowdHuman detector)
+        class_id = int(det[5]) if len(det) > 5 else None
+
+        # Upperbody crop: apply to all boxes when in upperbody mode
+        if crowdhuman_filter == 'upperbody' and class_id is not None:
+            x1_raw, y1_raw, x2_raw, y2_raw = boxes.astype(int)
+            y2_raw = y1_raw + (y2_raw - y1_raw) // 2
+            boxes = np.array([x1_raw, y1_raw, x2_raw, y2_raw], dtype=np.float32)
+
         x1, y1, x2, y2 = boxes.astype(int)
         x1, y1, x2, y2 = scale_bb(x1, y1, x2, y2, mask_scale)
         # Clip bb coordinates to valid frame region
         y1, y2 = max(0, y1), min(frame.shape[0] - 1, y2)
         x1, x2 = max(0, x1), min(frame.shape[1] - 1, x2)
+
+        # Determine if this detection is gap-filled (tracked)
+        is_tracked = (original_dets_count is not None) and (i >= original_dets_count)
+
         draw_det(
             frame, score, i, x1, y1, x2, y2,
             replacewith=replacewith,
             ellipse=ellipse,
             draw_scores=draw_scores,
             replaceimg=replaceimg,
-            mosaicsize=mosaicsize
+            mosaicsize=mosaicsize,
+            is_tracked=is_tracked,
+            class_id=class_id
         )
 
 
@@ -105,7 +150,7 @@ def cam_read_iter(reader):
 def video_detect(
         ipath: str,
         opath: str,
-        centerface: CenterFace,
+        detector: Any,
         threshold: float,
         enable_preview: bool,
         cam: bool,
@@ -118,7 +163,24 @@ def video_detect(
         replaceimg = None,
         keep_audio: bool = False,
         mosaicsize: int = 20,
-        disable_progress_output = False
+        disable_progress_output = False,
+        enable_tracking: bool = False,
+        track_iou_threshold: float = 0.25,
+        track_dist_threshold: float = 1.5,
+        track_alpha: float = 0.65,
+        track_ttl: int = 10,
+        track_expansion: float = 0.05,
+        track_confirm_window: int = 2,
+        track_debug: bool = False,
+        enable_proximity_search: bool = False,
+        proximity_ttl: int = 10,
+        proximity_expand: float = 1.8,
+        proximity_thresh: Optional[float] = None,
+        proximity_iou: float = 0.15,
+        proximity_dist: float = 1.2,
+        proximity_iou_assoc: float = 0.3,
+        proximity_debug: bool = False,
+        crowdhuman_filter: str = 'both'
 ):
     try:
         if 'fps' in ffmpeg_config:
@@ -158,14 +220,76 @@ def video_detect(
             opath, format='FFMPEG', mode='I', **_ffmpeg_config
         )
 
+    # Initialize tracking if enabled
+    frame_idx = 0
+    tracker = None
+    if enable_tracking:
+        from deface.tracker import FaceTracker
+        tracker = FaceTracker(
+            iou_threshold=track_iou_threshold,
+            norm_dist_threshold=track_dist_threshold,
+            alpha=track_alpha,
+            ttl=track_ttl,
+            expansion_rate=track_expansion,
+            confirmation_window=track_confirm_window,
+            debug=track_debug
+        )
+        if not disable_progress_output:
+            print(f"[Tracking] Enabled with TTL={track_ttl}, IoU={track_iou_threshold}, "
+                  f"NormDist={track_dist_threshold}, Alpha={track_alpha}, Expansion={int(track_expansion*100)}%")
+
+    # Initialize proximity search if enabled
+    proximity_search_mgr = None
+    if enable_proximity_search:
+        from deface.proximity_search import ProximitySearchManager, ProximitySearchConfig
+        # Use 0.8 * threshold if not specified
+        _proximity_thresh = proximity_thresh if proximity_thresh is not None else threshold * 0.8
+        config = ProximitySearchConfig(
+            proximity_ttl=proximity_ttl,
+            proximity_expand=proximity_expand,
+            proximity_thresh=_proximity_thresh,
+            proximity_iou=proximity_iou,
+            proximity_dist=proximity_dist,
+            proximity_iou_assoc=proximity_iou_assoc,
+            debug=proximity_debug
+        )
+        proximity_search_mgr = ProximitySearchManager(detector, config)
+        if not disable_progress_output:
+            print(f"[Proximity Search] Enabled with TTL={proximity_ttl}, "
+                  f"Expand={proximity_expand}x, Thresh={_proximity_thresh:.2f}")
+
     for frame in read_iter:
-        # Perform network inference, get bb dets but discard landmark predictions
-        dets, _ = centerface(frame, threshold=threshold)
+        # Perform network inference, get bb dets and landmarks
+        dets, lms = detector(frame, threshold=threshold)
+
+        # Apply proximity search if enabled (reacquire missed faces via ROI detection)
+        if proximity_search_mgr is not None:
+            # Update confirmed face states from fresh detections
+            proximity_search_mgr.update_confirmed_detections(dets, lms, frame_idx)
+
+            # Attempt to reacquire missing confirmed faces
+            reacquired_dets, reacquired_lms = proximity_search_mgr.search_missing_faces(
+                frame, dets, frame_idx, threshold
+            )
+
+            # Merge reacquired detections with original
+            if len(reacquired_dets) > 0:
+                dets = np.vstack([dets, reacquired_dets])
+                lms = np.vstack([lms, reacquired_lms])
+
+        # Track original detection count before gap-filling augmentation
+        original_dets_count = len(dets)
+
+        # Apply tracking if enabled (injects gap-filled detections)
+        if tracker is not None:
+            dets, lms = tracker.update(dets, lms, frame_idx)
 
         anonymize_frame(
             dets, frame, mask_scale=mask_scale,
             replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
-            replaceimg=replaceimg, mosaicsize=mosaicsize
+            replaceimg=replaceimg, mosaicsize=mosaicsize,
+            original_dets_count=original_dets_count if tracker is not None else None,
+            crowdhuman_filter=crowdhuman_filter
         )
 
         if opath is not None:
@@ -177,16 +301,33 @@ def video_detect(
                 cv2.destroyAllWindows()
                 break
         bar.update()
+        frame_idx += 1
+
     reader.close()
     if opath is not None:
         writer.close()
     bar.close()
 
+    # Print proximity search statistics if enabled
+    if proximity_search_mgr is not None and not disable_progress_output:
+        stats = proximity_search_mgr.get_stats()
+        print(f"[Proximity Search] Stats: {stats['total_roi_searches']} ROI searches, "
+              f"{stats['successful_reacquisitions']} successful reacquisitions, "
+              f"{stats['failed_validations']} failed validations")
+
+    # Print tracking statistics if enabled
+    if tracker is not None and not disable_progress_output:
+        stats = tracker.get_stats()
+        print(f"[Tracking] Stats: {stats['total_detections']} detections, "
+              f"{stats['total_tracks_created']} tracks created, "
+              f"{stats['frames_with_gaps_filled']} frames gap-filled, "
+              f"{stats['total_gap_fills']} total gap-fills")
+
 
 def image_detect(
         ipath: str,
         opath: str,
-        centerface: CenterFace,
+        detector: Any,
         threshold: float,
         replacewith: str,
         mask_scale: float,
@@ -196,6 +337,7 @@ def image_detect(
         keep_metadata: bool,
         replaceimg = None,
         mosaicsize: int = 20,
+        crowdhuman_filter: str = 'both',
 ):
     frame = iio.imread(ipath)
 
@@ -205,12 +347,13 @@ def image_detect(
         exif_dict = metadata.get("exif", None)
 
     # Perform network inference, get bb dets but discard landmark predictions
-    dets, _ = centerface(frame, threshold=threshold)
+    dets, _ = detector(frame, threshold=threshold)
 
     anonymize_frame(
         dets, frame, mask_scale=mask_scale,
         replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
-        replaceimg=replaceimg, mosaicsize=mosaicsize
+        replaceimg=replaceimg, mosaicsize=mosaicsize,
+        crowdhuman_filter=crowdhuman_filter
     )
 
     if enable_preview:
@@ -248,12 +391,15 @@ def get_anonymized_image(frame,
                          mask_scale: float,
                          ellipse: bool,
                          draw_scores: bool,
-                         replaceimg = None
+                         replaceimg = None,
+                         crowdhuman_filter: str = 'both'
                          ):
     """
     Method for getting an anonymized image without CLI
     returns frame
     """
+
+    from deface.centerface import CenterFace
 
     centerface = CenterFace(in_shape=None, backend='auto')
     dets, _ = centerface(frame, threshold=threshold)
@@ -261,7 +407,8 @@ def get_anonymized_image(frame,
     anonymize_frame(
         dets, frame, mask_scale=mask_scale,
         replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
-        replaceimg=replaceimg
+        replaceimg=replaceimg,
+        crowdhuman_filter=crowdhuman_filter
     )
 
     return frame
@@ -276,8 +423,11 @@ def parse_cli_args():
         '--output', '-o', default=None, metavar='O',
         help='Output file name. Defaults to input path + postfix "_anonymized".')
     parser.add_argument(
-        '--thresh', '-t', default=0.2, type=float, metavar='T',
-        help='Detection threshold (tune this to trade off between false positive and false negative rate). Default: 0.2.')
+        '--detector', default='scrfd2.5g', choices=['scrfd2.5g','scrfd10g', 'centerface', 'crowdhuman'],
+        help='Detector backend. Default: "scrfd2.5g". Use "crowdhuman" for CrowdHuman-trained YOLOv5m.')
+    parser.add_argument(
+        '--thresh', '-t', default=0.3, type=float, metavar='T',
+        help='Detection threshold (tune this to trade off between false positive and false negative rate). Default: 0.3.')
     parser.add_argument(
         '--scale', '-s', default=None, metavar='WxH',
         help='Downscale images for network inference to this size (format: WxH, example: --scale 640x360).')
@@ -290,6 +440,9 @@ def parse_cli_args():
     parser.add_argument(
         '--draw-scores', default=False, action='store_true',
         help='Draw detection scores onto outputs.')
+    parser.add_argument(
+        '--scores', default=False, action='store_true',
+        help='Debug mode: draw bounding boxes with confidence scores instead of blurring faces.')
     parser.add_argument(
         '--disable-progress-output', default=False, action='store_true',
         help='Disable video progress output to console.')
@@ -305,6 +458,60 @@ def parse_cli_args():
     parser.add_argument(
         '--mosaicsize', default=20, type=int, metavar='width',
         help='Setting the mosaic size. Requires --replacewith mosaic option. Default: 20.')
+    parser.add_argument(
+        '--enable-tracking', default=False, action='store_true',
+        help='Enable face tracking to fill detection gaps (1-10 frames). Disabled by default.')
+    parser.add_argument(
+        '--track-iou', default=0.25, type=float, metavar='IOU',
+        help='IoU threshold for track-to-detection association. Default: 0.25.')
+    parser.add_argument(
+        '--track-distance', default=1.5, type=float, metavar='DIST',
+        help='Normalized distance threshold for track association (multiplier of box diagonal). Default: 1.5.')
+    parser.add_argument(
+        '--track-alpha', default=0.65, type=float, metavar='ALPHA',
+        help='EMA smoothing factor for track box updates (0-1, higher = more responsive). Default: 0.65.')
+    parser.add_argument(
+        '--track-ttl', default=10, type=int, metavar='TTL',
+        help='Track time-to-live: continue blurring for this many frames after detection loss, then delete. Default: 10.')
+    parser.add_argument(
+        '--track-expansion', default=0.05, type=float, metavar='EXPANSION',
+        help='Box expansion factor per miss during gap-filling (5perc = 0.05 per side). Default: 0.05.')
+    parser.add_argument(
+        '--track-confirm-window', default=2, type=int, metavar='WINDOW',
+        help='Consecutive detections required before track activates gap-filling (reduces false positives). Default: 2.')
+    parser.add_argument(
+        '--track-debug', default=False, action='store_true',
+        help='Enable debug output for tracking (prints matches and gap-fills per frame).')
+    parser.add_argument(
+        '--enable-proximity-search', default=False, action='store_true',
+        help='Enable proximity search to reacquire missed faces via ROI-based detection. Default: disabled.')
+    parser.add_argument(
+        '--proximity-ttl', default=10, type=int, metavar='TTL',
+        help='Max frames since last confirmation to attempt proximity search. Default: 10.')
+    parser.add_argument(
+        '--proximity-expand', default=1.8, type=float, metavar='FACTOR',
+        help='ROI expansion factor around last confirmed box. Default: 1.8.')
+    parser.add_argument(
+        '--proximity-thresh', default=None, type=float, metavar='THRESH',
+        help='Detection threshold for proximity ROIs (None = 0.8 * main threshold). Default: None.')
+    parser.add_argument(
+        '--proximity-iou', default=0.15, type=float, metavar='IOU',
+        help='Minimum IoU with last confirmed box for validation. Default: 0.15.')
+    parser.add_argument(
+        '--proximity-dist', default=1.2, type=float, metavar='DIST',
+        help='Max normalized center distance for validation (× box diagonal). Default: 1.2.')
+    parser.add_argument(
+        '--proximity-iou-assoc', default=0.3, type=float, metavar='IOU',
+        help='Minimum IoU for confirming detected face matches prior detections in proximity search. Default: 0.3.')
+    parser.add_argument(
+        '--proximity-debug', default=False, action='store_true',
+        help='Enable debug output for proximity search (prints per-frame stats).')
+    parser.add_argument(
+        '--crowdhuman-filter', default='both',
+        choices=['both', 'upperbody'],
+        help='CrowdHuman only: blur mode. '
+             '"both" = blur all detections as-is (default), '
+             '"upperbody" = crop every detection box to its top 50%% before blurring.')
     parser.add_argument(
         '--keep-audio', '-k', default=False, action='store_true',
         help='Keep audio from video source file and copy it over to the output (only applies to videos).')
@@ -354,7 +561,7 @@ def main():
             # or an invalid path. The latter two cases are handled below.
             ipaths.append(path)
 
-    
+    #comfy variables
     base_opath = args.output
     replacewith = args.replacewith
     enable_preview = args.preview
@@ -372,6 +579,34 @@ def main():
     replaceimg = None
     disable_progress_output = args.disable_progress_output
 
+    # Tracking parameters
+    enable_tracking = args.enable_tracking
+    track_iou_threshold = args.track_iou
+    track_dist_threshold = args.track_distance
+    track_alpha = args.track_alpha
+    track_ttl = args.track_ttl
+    track_expansion = args.track_expansion
+    track_confirm_window = args.track_confirm_window
+    track_debug = args.track_debug
+
+    # Proximity search parameters
+    enable_proximity_search = args.enable_proximity_search
+    proximity_ttl = args.proximity_ttl
+    proximity_expand = args.proximity_expand
+    proximity_thresh = args.proximity_thresh
+    proximity_iou = args.proximity_iou
+    proximity_dist = args.proximity_dist
+    proximity_iou_assoc = args.proximity_iou_assoc
+    proximity_debug = args.proximity_debug
+
+    # CrowdHuman class filter
+    crowdhuman_filter = args.crowdhuman_filter
+
+    # When --scores flag is used, override to draw boxes with confidence scores instead of blurring
+    if args.scores:
+        replacewith = 'none'
+        draw_scores = True
+
     if in_shape is not None:
         w, h = in_shape.split('x')
         in_shape = int(w), int(h)
@@ -381,7 +616,46 @@ def main():
 
 
     # TODO: scalar downscaling setting (-> in_shape), preserving aspect ratio
-    centerface = CenterFace(in_shape=in_shape, backend=backend, override_execution_provider=execution_provider)
+    if args.detector == 'scrfd2.5g':
+        from deface.scrfd_detector import SCRFDdetector
+        from deface.model_downloader import ensure_model_present
+
+        default_scrfd_onnx_path = ensure_model_present('scrfd2.5g', _models_dir)
+        detector = SCRFDdetector(
+            model_path=default_scrfd_onnx_path,
+            device='auto',
+            override_execution_provider=execution_provider,
+        )
+    elif args.detector == 'scrfd10g':
+        from deface.scrfd10g_detector import SCRFD10GDetector
+        from deface.model_downloader import ensure_model_present
+
+        scrfd_10g_onnx_path = ensure_model_present('scrfd10g', _models_dir)
+        detector = SCRFD10GDetector(
+            model_path=scrfd_10g_onnx_path,
+            device='auto',
+            override_execution_provider=execution_provider,
+        )
+    elif args.detector == 'centerface':
+        from deface.centerface import CenterFace
+
+        detector = CenterFace(
+            in_shape=in_shape,
+            backend=backend,
+            override_execution_provider=execution_provider,
+        )
+    elif args.detector == 'crowdhuman':
+        from deface.crowdhuman_yolov5_detector import CrowdHumanYOLOv5Detector
+        from deface.model_downloader import ensure_model_present
+
+        crowdhuman_yolov5m_path = ensure_model_present('crowdhuman', _models_dir)
+        detector = CrowdHumanYOLOv5Detector(
+            model_path=crowdhuman_yolov5m_path,
+            device='auto',
+            override_execution_provider=execution_provider,
+        )
+    else:
+        raise RuntimeError(f'Unknown detector: {args.detector}')
 
     multi_file = len(ipaths) > 1
     if multi_file:
@@ -404,7 +678,7 @@ def main():
             video_detect(
                 ipath=ipath,
                 opath=opath,
-                centerface=centerface,
+                centerface=detector,
                 threshold=threshold,
                 cam=is_cam,
                 replacewith=replacewith,
@@ -417,13 +691,30 @@ def main():
                 ffmpeg_config=ffmpeg_config,
                 replaceimg=replaceimg,
                 mosaicsize=mosaicsize,
-                disable_progress_output=disable_progress_output
+                disable_progress_output=disable_progress_output,
+                enable_tracking=enable_tracking,
+                track_iou_threshold=track_iou_threshold,
+                track_dist_threshold=track_dist_threshold,
+                track_alpha=track_alpha,
+                track_ttl=track_ttl,
+                track_expansion=track_expansion,
+                track_confirm_window=track_confirm_window,
+                track_debug=track_debug,
+                enable_proximity_search=enable_proximity_search,
+                proximity_ttl=proximity_ttl,
+                proximity_expand=proximity_expand,
+                proximity_thresh=proximity_thresh,
+                proximity_iou=proximity_iou,
+                proximity_dist=proximity_dist,
+                proximity_iou_assoc=proximity_iou_assoc,
+                proximity_debug=proximity_debug,
+                crowdhuman_filter=crowdhuman_filter
             )
         elif filetype == 'image':
             image_detect(
                 ipath=ipath,
                 opath=opath,
-                centerface=centerface,
+                centerface=detector,
                 threshold=threshold,
                 replacewith=replacewith,
                 mask_scale=mask_scale,
@@ -432,7 +723,8 @@ def main():
                 enable_preview=enable_preview,
                 keep_metadata=keep_metadata,
                 replaceimg=replaceimg,
-                mosaicsize=mosaicsize
+                mosaicsize=mosaicsize,
+                crowdhuman_filter=crowdhuman_filter
             )
         elif filetype is None:
             print(f'Can\'t determine file type of file {ipath}. Skipping...')
